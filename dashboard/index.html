@@ -742,6 +742,17 @@ tr:hover td{background:rgba(123,97,255,.04);}
 <script>
 'use strict';
 
+async function fetchWithTimeout(url, ms, opts) {
+  const ctrl = new AbortController();
+  const tid = setTimeout(function(){ ctrl.abort(); }, ms || 15000);
+  try {
+    const r = await fetch(url, Object.assign({}, opts || {}, { signal: ctrl.signal }));
+    return r;
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
 // ── CONFIG ─────────────────────────────────────────────────────────
 let CFG = {
   workerUrl:'', authToken:'swingai-revolut-2024', mode:'paper',
