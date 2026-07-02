@@ -2292,19 +2292,9 @@ setInterval(function() { var t = new Date().toLocaleTimeString('pl-PL'); gi('st-
 // ── BOT CONTROL ────────────────────────────────────────────────────
 async function startBot() {
   if (CFG.mode === 'live') {
-    if (!CFG.apiKey || !CFG.secret) { alert('Tryb LIVE wymaga kluczy Binance API. Otworz Konfiguracja.'); return; }
-    if (!workerReady()) {
-      alert('UWAGA: Tryb LIVE wymaga Cloudflare Worker URL.\n\nBinance blokuje bezpośrednie wywołania REST z przeglądarki (CORS) dla endpointów signed. Bez Worker URL wszystkie zlecenia BUY/SELL zakończą się błędem CORS.\n\nOtworz Konfiguracja i ustaw Worker URL.');
-      return;
-    }
-  }
-  if (CFG.mode === 'bybit') {
-    if (!CFG.bybApiKey || !CFG.bybSecret) { alert('Tryb Bybit EU wymaga kluczy Bybit API. Otworz Konfiguracja.'); return; }
-    if (!bybWorkerReady()) { alert('Tryb Bybit EU wymaga Cloudflare Worker URL (pole Bybit). Otworz Konfiguracja.'); return; }
-  }
-  if (CFG.mode === 'okx') {
-    if (!CFG.okxApiKey || !CFG.okxSecret || !CFG.okxPassphrase) { alert('Tryb OKX wymaga API Key, Secret i Passphrase. Otworz Konfiguracja.'); return; }
-    if (!okxWorkerReady()) { alert('Tryb OKX LIVE wymaga Cloudflare Worker URL (pole OKX). Otworz Konfiguracja.'); return; }
+    if (!CFG.workerUrl) { alert('Tryb LIVE wymaga Cloudflare Worker URL. Otworz Konfiguracja.'); return; }
+    if (!CFG.revxApiKey) { alert('Tryb LIVE wymaga Revolut X API Key. Otworz Konfiguracja.'); return; }
+    if (!CFG.revxPrivKey) { alert('Tryb LIVE wymaga Revolut X Private Key PEM. Otworz Konfiguracja.'); return; }
   }
   running = true;
   gi('btn-run').style.display  = 'none';
