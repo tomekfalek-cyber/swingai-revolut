@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
@@ -1238,7 +1238,7 @@ function roundQty(sym, qty) {
 }
 // Prefetch stepSize przy starcie bota dla wszystkich par
 async function prefetchStepSizes() {
-  if (CFG.mode === 'paper' || CFG.exchange !== 'binance') return;
+  if (CFG.mode === 'paper') return;
   try {
     const d = await pub('/api/v3/exchangeInfo');
     (d.symbols||[]).forEach(function(info) {
@@ -1271,11 +1271,14 @@ async function getTicker(sym){
 
 async function getUSDC() {
   if (CFG.mode === 'paper') return ST.paperBal;
-  if (CFG.exchange === 'bybit') return bybGetUSDC();
-  if (CFG.exchange === 'okx')   return okxGetUSDC();
-  const d = await signedReq('GET', '/api/v3/account');
-  const b = (d.balances||[]).find(x => x.asset==='USDC');
-  return b ? +b.free : 0;
+  if (!CFG.workerUrl) return 0;
+  try {
+    const tok = CFG.authToken || 'swingai-revolut-2024';
+    const r = await fetchWithTimeout(CFG.workerUrl + '/balance?auth=' + encodeURIComponent(tok), 10000);
+    if (!r.ok) return 0;
+    const d = await r.json();
+    return d.balance != null ? +d.balance : 0;
+  } catch(e) { return 0; }
 }
 async function execBuy(sym, quoteQty) {
   if (CFG.mode === 'paper') {
@@ -1283,31 +1286,34 @@ async function execBuy(sym, quoteQty) {
     if (!p || p <= 0) throw new Error('execBuy: niepoprawna cena '+sym);
     ST.paperBal -= quoteQty; return {price:p, qty:quoteQty/p};
   }
-  if (CFG.exchange === 'bybit') return bybExecBuy(sym, quoteQty);
-  if (CFG.exchange === 'okx')   return okxExecBuy(sym, quoteQty);
-  // Zaokrąglij quoteQty do 2 miejsc (wymóg Binance minNotional)
-  const safeQty = Math.floor(quoteQty * 100) / 100;
-  if (safeQty < 1) throw new Error('execBuy: quoteQty za małe: $'+safeQty);
-  const d = await signedReq('POST', '/api/v3/order',
-    {symbol:sym, side:'BUY', type:'MARKET', quoteOrderQty:safeQty.toFixed(2)});
-  // Użyj średniej ważonej z fills (obsługa częściowych wypełnień)
-  const fillPrice = calcFillPrice(d.fills) || +d.price || 0;
-  return {price:fillPrice, qty:+d.executedQty};
+  const tok = CFG.authToken || 'swingai-revolut-2024';
+  const rvxSym = sym.includes('/') ? sym : sym.replace('_','/');;
+  const r = await fetchWithTimeout(CFG.workerUrl + '/order?auth=' + encodeURIComponent(tok), 15000, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({instrument_code: rvxSym, side:'BUY', type:'MARKET', amount: quoteQty.toFixed(2)})
+  });
+  if (!r.ok) { const e = await r.text(); throw new Error('execBuy Revolut X: ' + e); }
+  const d = await r.json();
+  const fillPrice = +(d.price || d.avg_price || 0);
+  const fillQty = +(d.qty || d.filled_quantity || quoteQty / (fillPrice||1));
+  return {price:fillPrice, qty:fillQty};
 }
 async function execSell(sym, qty) {
   if (CFG.mode === 'paper') {
     const t = await getTicker(sym); const p = +t.lastPrice;
     ST.paperBal += p * qty; return {price:p, qty};
   }
-  if (CFG.exchange === 'bybit') return bybExecSell(sym, qty);
-  if (CFG.exchange === 'okx')   return okxExecSell(sym, qty);
-  // qty musi być zaokrąglone do stepSize pary — pobierz z cache lub użyj bezpiecznego zaokrąglenia
-  const roundedQty = roundQty(sym, qty);
-  if (roundedQty <= 0) throw new Error('execSell: qty=0 po zaokrągleniu ('+sym+')');
-  const d = await signedReq('POST', '/api/v3/order',
-    {symbol:sym, side:'SELL', type:'MARKET', quantity:roundedQty});
-  const fillPrice = calcFillPrice(d.fills) || +d.price || 0;
-  return {price:fillPrice, qty:+d.executedQty};
+  const tok2 = CFG.authToken || 'swingai-revolut-2024';
+  const rvxSym2 = sym.includes('/') ? sym : sym.replace('_','/');;
+  const r2 = await fetchWithTimeout(CFG.workerUrl + '/order?auth=' + encodeURIComponent(tok2), 15000, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({instrument_code: rvxSym2, side:'SELL', type:'MARKET', quantity: qty})
+  });
+  if (!r2.ok) { const e2 = await r2.text(); throw new Error('execSell Revolut X: ' + e2); }
+  const d2 = await r2.json();
+  const fillPrice2 = +(d2.price || d2.avg_price || 0);
+  const fillQty2 = +(d2.qty || d2.filled_quantity || qty);
+  return {price:fillPrice2, qty:fillQty2};
 }
 async function getTotal() {
   let t = CFG.mode==='paper' ? ST.paperBal : await getUSDC().catch(()=>0);
@@ -1755,7 +1761,7 @@ var WS = {
 
   connect: function() {
     if (this.blocked) return;                              // siec blokuje — nie probuj
-    if (CFG.exchange === 'bybit' || CFG.exchange === 'okx') return; // nie-Binance — polling REST
+    return; // Revolut X — polling REST via Worker
     if (this.socket && this.socket.readyState < 2) return; // juz podlaczony
     try {
       this.socket = new WebSocket(this.buildStreamUrl());
@@ -2419,7 +2425,7 @@ async function updateHeader() {
     const rw = gi('rb-proxy');
     if (rw) { rw.textContent=CFG.mode==='paper'?'(PAPER)':workerReady()||bybWorkerReady()?'OK':'brak'; rw.className=CFG.mode==='paper'?'val neu':workerReady()||bybWorkerReady()?'val up':'val dn'; }
     const re = gi('rb-exchange');
-    if (re) { re.textContent=CFG.exchange==='bybit'?'Bybit EU':'Revolut X'; re.className='val acc'; }
+    if (re) { re.textContent='Revolut X'; re.className='val acc'; }
   } catch(e) {}
 }
 
@@ -2757,21 +2763,17 @@ var OBI = {
     }
     try {
       var result;
-      if (CFG.exchange === 'bybit') {
-        result = await bybGetOrderbook(sym);
-        result.ts = now;
-      } else if (CFG.exchange === 'okx') {
-        result = await okxGetOrderbook(sym);
-        result.ts = now;
-      } else {
-        // Binance orderbook
-        var d = await pub('/api/v3/depth', {symbol:sym, limit:20});
-        var bidVol = (d.bids||[]).reduce(function(s,b){ var v=(parseFloat(b[0])||0)*(parseFloat(b[1])||0); return s+(isFinite(v)?v:0); }, 0);
-        var askVol = (d.asks||[]).reduce(function(s,a){ var v=(parseFloat(a[0])||0)*(parseFloat(a[1])||0); return s+(isFinite(v)?v:0); }, 0);
+      {
+        // Gate.io orderbook
+        var gSym = sym.includes('_') ? sym : sym.replace('/','_');
+        var d = await fetchWithTimeout('https://api.gateio.ws/api/v4/spot/order_book?currency_pair='+gSym+'&limit=20', 10000);
+        var dj = await d.json();
+        var bidVol = (dj.bids||[]).reduce(function(s,b){ var v=(parseFloat(b[0])||0)*(parseFloat(b[1])||0); return s+(isFinite(v)?v:0); }, 0);
+        var askVol = (dj.asks||[]).reduce(function(s,a){ var v=(parseFloat(a[0])||0)*(parseFloat(a[1])||0); return s+(isFinite(v)?v:0); }, 0);
         var total  = bidVol + askVol;
         var ratio  = total > 0 ? bidVol / total : 0.5;
-        var spread = d.asks[0] && d.bids[0]
-          ? (parseFloat(d.asks[0][0]) - parseFloat(d.bids[0][0])) / parseFloat(d.bids[0][0]) * 100
+        var spread = dj.asks[0] && dj.bids[0]
+          ? (parseFloat(dj.asks[0][0]) - parseFloat(dj.bids[0][0])) / parseFloat(dj.bids[0][0]) * 100
           : 0;
         result = { ratio:+ratio.toFixed(3), bidVol:bidVol, askVol:askVol, spread:+spread.toFixed(4), ts:now };
       }
@@ -4391,74 +4393,7 @@ function riskBarHtml(kellySzanse, pct) {
     '</div>';
 }
 </script>
-<script>
-(function() {
-  var B = 'https://swingai-bot-24h.tomek-falek.workers.dev';
-  var T = 'swingai-secret-2024';
-  function upd() {
-    fetch(B + '/balance?auth=' + T)
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        if (d.balance === null || d.balance === undefined) return;
-        var bal = d.balance;
-        var hU = document.getElementById('h-usdc');
-        var rP = document.getElementById('rb-paper');
-        if (hU) hU.textContent = '$' + bal.toFixed(2);
-        if (rP) rP.textContent = '$' + bal.toFixed(2);
-        if (typeof ST !== 'undefined' && d.mode !== 'live') ST.paperBal = bal;
-        if (d.mode === 'live') {
-          var mb = document.getElementById('mode-badge');
-          var sm = document.getElementById('st-mode');
-          var rm = document.getElementById('rb-mode');
-          if (mb) { mb.textContent = 'LIVE'; mb.className = 'badge bon'; }
-          if (sm) sm.textContent = 'LIVE';
-          if (rm) rm.textContent = 'LIVE';
-        }
-      }).catch(function() {});
-  }
-  document.addEventListener('DOMContentLoaded', function() {
-    setTimeout(upd, 2000);
-    setInterval(upd, 30000);
-  });
-})();
 
-
-// ── REVOLUT X ORDERS ─────────────────────────────────────────────
-const CRYPTO_CURRENCIES=['BTC','ETH','SOL','XRP','DOGE','ADA','AVAX','LINK','USDC','USDT','BNB','DOT','NEAR','UNI','ATOM','SHIB','LTC'];
-async function fetchRevolutOrders(){
-  if(!CFG.workerUrl){toast('Błąd','Brak Worker URL','warn');return;}
-  var e=gi('orders-last-update');if(e)e.textContent='Pobieranie...';
-  const tok=CFG.authToken||'swingai-revolut-2024';
-  try{
-    const balR=await fetch(CFG.workerUrl+'/balance?auth='+encodeURIComponent(tok),{signal:AbortSignal.timeout(15000)});
-    if(balR.ok){const bal=await balR.json();renderRevxBalances(Array.isArray(bal)?bal:(bal.balances||[bal]));}
-    const ordR=await fetch(CFG.workerUrl+'/orders?auth='+encodeURIComponent(tok),{signal:AbortSignal.timeout(15000)});
-    if(ordR.ok){const ord=await ordR.json();renderOpenOrders(ord.open||[]);renderOrderHistory(ord.history||[]);}
-    if(e)e.textContent='Ost. akt.: '+new Date().toLocaleTimeString('pl');
-  }catch(ex){if(e)e.textContent='Błąd: '+ex.message;toast('Błąd','Nie można pobrać danych','err');}
-}
-function renderRevxBalances(bals){
-  var el=gi('revx-balances');if(!el)return;
-  var cr=(bals||[]).filter(function(b){return CRYPTO_CURRENCIES.indexOf(b.currency)>=0&&parseFloat(b.balance)>0;});
-  if(!cr.length){el.innerHTML='<div style="color:var(--text3)">Brak sald krypto</div>';return;}
-  el.innerHTML=cr.map(function(b){return '<div style="background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;min-width:90px;text-align:center"><div style="font-size:10.5pt;font-weight:700;font-family:JetBrains Mono,monospace">'+parseFloat(b.balance).toFixed(6)+'</div><div style="font-size:7.5pt;color:var(--text3)">'+b.currency+'</div>'+(b.usd_value?'<div style="font-size:8pt;color:var(--accent)">$'+parseFloat(b.usd_value).toFixed(2)+'</div>':'')+'</div>';}).join('');
-}
-function renderOpenOrders(orders){
-  var el=gi('open-orders-body');if(!el)return;
-  if(!orders.length){el.innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--text3)">Brak aktywnych zleceń krypto</td></tr>';return;}
-  el.innerHTML=orders.map(function(o){var sd=o.side==='BUY'?'<span class="pill pill-buy">BUY</span>':'<span class="pill pill-sl">SELL</span>';return '<tr><td><b>'+(o.instrument_code||o.pair||'--')+'</b></td><td>'+sd+'</td><td>'+(o.type||'--')+'</td><td style="font-family:JetBrains Mono,monospace">'+(o.price?fp(o.price):'MARKET')+'</td><td style="font-family:JetBrains Mono,monospace">'+(o.quantity||'--')+'</td><td>$'+(o.value?parseFloat(o.value).toFixed(2):'--')+'</td><td><span class="pill pill-cool">'+(o.state||'PENDING')+'</span></td><td style="font-size:8pt;color:var(--text3)">'+(o.created_at?new Date(o.created_at).toLocaleString('pl'):'--')+'</td><td><button onclick="cancelRevxOrder(String.raw'+o.id+')" class="stop-btn" style="padding:2px 8px;font-size:7.5pt">Anuluj</button></td></tr>';}).join('');
-}
-function renderOrderHistory(orders){
-  var el=gi('order-history-body');if(!el)return;
-  if(!orders.length){el.innerHTML='<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--text3)">Brak historii</td></tr>';return;}
-  el.innerHTML=orders.slice(0,20).map(function(o){var sd=o.side==='BUY'?'<span class="pill pill-buy">BUY</span>':'<span class="pill pill-sl">SELL</span>';return '<tr><td><b>'+(o.instrument_code||o.pair||'--')+'</b></td><td>'+sd+'</td><td>'+(o.type||'--')+'</td><td style="font-family:JetBrains Mono,monospace">'+(o.avg_price?fp(o.avg_price):o.price?fp(o.price):'--')+'</td><td style="font-family:JetBrains Mono,monospace">'+(o.filled_qty||o.quantity||'--')+'</td><td>$'+(o.value?parseFloat(o.value).toFixed(2):'--')+'</td><td><span class="pill" style="background:rgba(123,97,255,.1);color:var(--accent)">'+(o.state||'FILLED')+'</span></td><td style="font-size:8pt;color:var(--text3)">'+(o.created_at?new Date(o.created_at).toLocaleString('pl'):'--')+'</td></tr>';}).join('');
-}
-async function cancelRevxOrder(orderId){
-  if(!CFG.workerUrl){toast('Błąd','Brak Worker URL','warn');return;}
-  if(!confirm('Anulować zlecenie?'))return;
-  try{const tok=CFG.authToken||'swingai-revolut-2024';const r=await fetch(CFG.workerUrl+'/cancel-order?auth='+encodeURIComponent(tok)+'&id='+encodeURIComponent(orderId),{signal:AbortSignal.timeout(10000)});if(r.ok){toast('Anulowano','Zlecenie anulowane','info');setTimeout(fetchRevolutOrders,500);}else{toast('Błąd','HTTP '+r.status,'err');}}catch(ex){toast('Błąd',ex.message,'err');}
-}
-</script>
 </body>
 
 </html>
