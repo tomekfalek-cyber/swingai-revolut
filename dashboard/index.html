@@ -4287,6 +4287,12 @@ var _tge=gi('rb-tg'); if(_tge){ _tge.textContent=CFG.tgToken?'OK':'-'; _tge.clas
 var _rxe=gi('rb-exchange'); if(_rxe){ _rxe.textContent='Revolut X'; _rxe.className='val acc'; }
 renderPositions(); renderHistory(); renderStats(); renderCooldowns();
 updateAIStatusPanel();
+// Zaladuj saldo i pokaz pary przy starcie strony
+(async function initUI(){
+  try { const u=await getUSDC(); if(u>0){ gi('h-usdc').textContent='$'+u.toFixed(2); gi('h-total').textContent='$'+u.toFixed(2); } } catch(e){}
+  const defSigs = PAIRS.map(function(p){ return {sym:p,score:0,buy:false,trendD:0,rsi14:50,rsiD:50,macd:0,macdHist:0,bbPos:0.5,ema50:0,ema200:0,vwap:0,sr:{s:[],r:[]},why:[],price:0}; });
+  renderSigList(defSigs);
+})();
 log('SwingAI Bot v2 | '+PAIRS.length+' par | Kelly | Fear&Greed | PumpDump | 1H confirm');
 log('Tryb: '+CFG.mode.toUpperCase()+' | min score: '+CFG.minScore+' | ryzko: '+CFG.riskPct+'%/trade');
 if (_modelsLoaded) {
