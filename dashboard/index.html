@@ -184,7 +184,7 @@ tr:hover td{background:rgba(123,97,255,.04);}
 .tab-btn{padding:4px 12px;border-radius:20px;cursor:pointer;font-size:8.5pt;color:var(--text2);border:1px solid transparent;background:transparent;transition:all .15s;}
 .tab-btn:hover:not(.on){color:var(--text);background:rgba(255,255,255,.04);}
 .tab-btn.on{background:rgba(123,97,255,.15);color:var(--accent);border-color:var(--border2);}
-.tab-pane{display:none;height:100%;overflow-y:auto;}.tab-pane.on{display:block;}
+.tab-pane{display:none;height:100%;overflow-y:auto;}.tab-pane.on{display:block;}#tab-chart.on{display:flex;flex-direction:column;overflow:hidden;}
 #tab-wrap{flex:1;overflow:hidden;position:relative;}
 
 /* ── LOG ── */
@@ -425,7 +425,7 @@ tr:hover td{background:rgba(123,97,255,.04);}
     </div>
 
     <!-- CHART TAB -->
-    <div id="tab-chart" class="tab-pane" style="display:flex;flex-direction:column;height:100%;overflow:hidden;">
+    <div id="tab-chart" class="tab-pane">
       <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;">
         <span style="font-size:8.5pt;color:var(--text2)">Para:</span>
         <select id="inline-chart-sym" style="min-width:120px" onchange="inlineChartLoad()">
