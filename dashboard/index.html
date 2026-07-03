@@ -1362,6 +1362,7 @@ async function execSell(sym, qty) {
   if (!r2.ok) { const e2 = await r2.text(); throw new Error('execSell Revolut X: ' + e2); }
   const d2 = await r2.json();
   const fillPrice2 = +(d2.price || d2.avg_price || 0);
+  if(!fillPrice2 || fillPrice2 <= 0) throw new Error('execSell: Revolut X nie zwrocil ceny wypelnienia dla '+sym);
   const fillQty2 = +(d2.qty || d2.filled_quantity || qty);
   return {price:fillPrice2, qty:fillQty2};
 }
@@ -2036,8 +2037,15 @@ async function checkPositions() {
       // Użyj live ceny z WS jesli dostepna, w przeciwnym razie polling
       let cp = WS.isAlive() ? WS.getPrice(pos.sym) : null;
       if (!cp) {
-        const t = await getTicker(pos.sym);
-        cp = +t.lastPrice;
+        try {
+          const t = await getTicker(pos.sym);
+          cp = +t.lastPrice;
+          if(cp > 0) pos.cp = cp; // aktualizuj pos.cp przy sukcesie
+        } catch(e) {
+          log('checkPositions getTicker err: '+e.message,'warn');
+          cp = pos.cp || pos.entry; // fallback na ostatnią znana cenę
+          if(!cp || cp <= 0) continue; // brak ceny → pomiń
+        }
       }
       if (cp > (pos.highP||pos.entry)) pos.highP = cp;
       const pnlPct = (cp-pos.entry)/pos.entry*100;
@@ -2226,7 +2234,12 @@ async function openTrade(sig, fg, btcDrop, cachedTotal, cachedUSDC) {
       'TP: '+fp(execLevels.tp)+' | SL: '+fp(execLevels.sl)+'\n'+
       'ATR: '+execLevels.atrPct+'% | R:R: '+execLevels.rr+':1\n'+
       'Score: '+sig.score+'/100 | P(wzrost): '+(sig.finalProb*100||sig.score).toFixed(0)+'%');
-  } catch(e) { log('BUY '+sig.sym+': '+e.message,'err'); }
+  } catch(e) {
+    if (CFG.mode === 'live') {
+      showToast('UWAGA: Zlecenie BUY mogło zostać złożone na Revolut X, ale odpowiedź była niekompletna. Sprawdź ręcznie pozycje na giełdzie! Błąd: ' + e.message, 'err', 10000);
+    }
+    log('BUY '+sig.sym+': '+e.message,'err');
+  }
 }
 
 // ── MAIN CYCLE ─────────────────────────────────────────────────────
@@ -2787,7 +2800,10 @@ function saveSettings() {
   CFG.mode=gi('cfg-mode').value;
   CFG.tp=rawTP/100;CFG.sl=rawSL/100;CFG.trail=rawTrail/100;
   CFG.maxPos=rawMax;CFG.posSize=rawSize;CFG.intervalMin=rawInt;
-  CFG.paperBal=parseFloat(gi('cfg-paper-bal').value);
+  const pbVal = parseFloat(gi('cfg-paper-bal').value);
+  if(!isFinite(pbVal) || pbVal < 0) { errors.push('Saldo paper: wprowadź poprawną liczbę'); }
+  else CFG.paperBal = pbVal;
+  if(errors.length>0){gi('cfg-status').innerHTML='<span style="color:var(--red)">Błąd: '+errors.join('; ')+'</span>';return;}
   CFG.minScore=rawScore;CFG.riskPct=rawRisk;CFG.fgMin=isFinite(rawFG)?rawFG:20;
   CFG.tgToken=gi('cfg-tg-token').value.trim();CFG.tgChat=gi('cfg-tg-chat').value.trim();
   saveCfg();
@@ -3609,7 +3625,12 @@ function calcIndicatorsForCandle(closes, highs, lows, i, volumes) {
   if(trendD===2 && macdD.hist>0) regime='bull_trend';
   else if(trendD===-1) regime='bear_trend';
   else if(Math.abs(macdD.hist)<0.001*price) regime='sideways';
-  return { rsiD:rsiD, macdHist:macdD.hist, macdLine:macdD.line, bbPos:bbD.pos, trendD:trendD, mom5:mom5, mom10:mom10, atrVal:atr(h,l,c,14), price:price, volR:volR, regime:regime };
+  // Cechy potrzebne dla GBM (te same co analyzeSwing)
+  var bodyRatio = Math.abs(closes[i] - opens[i]) / (highs[i] - lows[i] + 0.000001);
+  var confirm1h = (rsiD > 50 && macdD.hist > 0) ? 1 : 0; // uproszczone potwierdzenie (brak osobnych danych 1H w backteście)
+  var obiRatio = 0.5; // OBI niedostępne w backteście — neutralna wartość
+  return { rsiD:rsiD, macdHist:macdD.hist, macdLine:macdD.line, bbPos:bbD.pos, trendD:trendD, mom5:mom5, mom10:mom10, atrVal:atr(h,l,c,14), price:price, volR:volR, regime:regime,
+           bodyRatio:bodyRatio, confirm1h:confirm1h, obiRatio:obiRatio };
 }
 
 function scoreCandle(ind, weights) {
@@ -3650,7 +3671,6 @@ function scoreCandle(ind, weights) {
     if(ind.regime==='bull_trend') score+=5;
     if(ind.regime==='bear_trend') score-=15;
     if(ind.regime==='volatile')   score-=8;
-    if(ind.regime==='sideways')   mlWeights=Object.assign({},mlWeights);
   }
   return Math.max(0, Math.min(100, Math.round(score)));
 }
@@ -4707,6 +4727,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </body>
 
 </html>
+
 
 
 
