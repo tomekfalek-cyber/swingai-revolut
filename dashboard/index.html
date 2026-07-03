@@ -3866,7 +3866,7 @@ function drawBtChart(curve, startCap) {
 // ── ML WEIGHT OPTIMIZER (Decision Tree / Information Gain) ─────────
 var mlTrainedWeights = null;
 
-async function runMLOptimize() {
+async async function runMLOptimize() {
   var sym    = gi('ml-sym').value;
   var days   = parseInt(gi('ml-days').value);
   var target = parseFloat(gi('ml-target').value)/100;
