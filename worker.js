@@ -1,4 +1,4 @@
-// SwingAI Bot 24/7 — Cloudflare Worker — REVOLUT X VERSION
+﻿// SwingAI Bot 24/7 — Cloudflare Worker — REVOLUT X VERSION
 // Multi-TF (Daily+4H+1H), NB+GBM+QL, PATTERNS, Kelly, ATR-TP/SL, CORR, OBI
 // Market data: Gate.io (public) | Execution: Revolut X (Ed25519)
 
@@ -228,8 +228,13 @@ export default {
     if (url.pathname === '/market') {
       const path = url.searchParams.get('path') || '';
       const qs   = url.searchParams.get('qs')   || '';
+      // FIX 9: zablokuj path traversal przed sprawdzeniem allowlist
+      if (path.includes('..') || qs.includes('..')) {
+        return new Response('Forbidden', { status: 403, headers: corsHeaders() });
+      }
       const allowed = ['/api/v4/spot/candlesticks', '/api/v4/spot/tickers', '/api/v4/spot/order_book'];
-      if (!allowed.some(function(p){ return path.startsWith(p); })) {
+      // FIX 9: dokładne porównanie ścieżki (bez parametrów) zamiast startsWith
+      if (!allowed.includes(path.split('?')[0])) {
         return new Response('Forbidden', { status: 403, headers: corsHeaders() });
       }
       try {
@@ -358,7 +363,7 @@ async function runBotCycle(env) {
       return tsN > lastRefit;
     }).length;
     if ((tradesSinceRefit >= 50 && trades.length >= 20) || (!gbm.trained && trades.length >= 20)) {
-      gbm.trainFromTrades(trades.slice(-200));
+      gbm.trainFromTrades(trades.slice(0, 200)); // FIX 7: slice(0,200) = najnowsze (trades posortowane od najnowszego)
       state.lastGbmRefit = Date.now();
       addLog(state, 'GBM walk-forward refit: ' + Math.min(trades.length,200) + ' tradów, OOS=' + gbm.accuracyOOS + '%', 'ok');
     }
@@ -661,6 +666,8 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
 async function checkPositions(cfg, state, env, ql) {
   const updated = [];
   for (const pos of (state.positions || [])) {
+    // FIX 6: jeśli pozycja jest już w trakcie zamykania — nie wysyłaj kolejnego SELL
+    if (pos.closing) { updated.push(pos); continue; }
     try {
       const price = await getLastPrice(pos.sym);
       pos.cp = price;
@@ -703,10 +710,14 @@ async function checkPositions(cfg, state, env, ql) {
       }
 
       if (reason) {
+        // FIX 6: ustaw flagę closing przed wywołaniem closePosition
+        pos.closing = true;
         const closed = await closePosition(pos, price, reason, cfg, state, ql);
         if (closed === false) {
+          pos.closing = false; // reset przy błędzie
           updated.push(pos);
         }
+        // sukces — nie wracaj pozycji do listy
       } else {
         updated.push(pos);
       }
@@ -964,7 +975,7 @@ function kellySize(cfg, state, total) {
   }
 
   const fixedSize = cfg.posSize || 15;
-  const trades    = (state.trades || []).slice(-30);
+  const trades    = (state.trades || []).slice(0, 30); // FIX 7: slice(0,30) = najnowsze 30 tradów
   if (trades.length < 5) {
     return Math.min(fixedSize, Math.max(10, safeTotal * (cfg.riskPct || 2) / 100));
   }
