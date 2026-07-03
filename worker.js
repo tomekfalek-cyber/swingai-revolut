@@ -50,7 +50,7 @@ export default {
     const authHeader  = request.headers.get('Authorization') || '';
     const authParam   = url.searchParams.get('auth') || '';
     const isAuth = authHeader === 'Bearer ' + AUTH_SECRET || authParam === AUTH_SECRET;
-    const publicPaths = ['/', '/state-public'];
+    const publicPaths = ['/', '/state-public', '/market'];
     if (!isAuth && !publicPaths.includes(url.pathname)) {
       return new Response('Unauthorized', { status: 401, headers: corsHeaders() });
     }
@@ -220,6 +220,25 @@ export default {
         return jsonResp({ ok: tgJson.ok, tg: tgJson });
       } catch(e) {
         return jsonResp({ ok: false, error: e.message });
+      }
+    }
+
+
+    // Proxy Gate.io — publiczny endpoint dla dashboard (omija Zscaler)
+    if (url.pathname === '/market') {
+      const path = url.searchParams.get('path') || '';
+      const qs   = url.searchParams.get('qs')   || '';
+      const allowed = ['/api/v4/spot/candlesticks', '/api/v4/spot/tickers', '/api/v4/spot/order_book'];
+      if (!allowed.some(function(p){ return path.startsWith(p); })) {
+        return new Response('Forbidden', { status: 403, headers: corsHeaders() });
+      }
+      try {
+        const gateUrl = 'https://api.gateio.ws' + path + (qs ? '?' + qs : '');
+        const r = await fetch(gateUrl, { headers: { 'User-Agent': 'SwingAI/1.0' } });
+        const body = await r.text();
+        return new Response(body, { status: r.status, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+      } catch(e) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
       }
     }
 
