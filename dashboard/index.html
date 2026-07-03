@@ -3626,7 +3626,7 @@ function calcIndicatorsForCandle(closes, highs, lows, i, volumes) {
   else if(trendD===-1) regime='bear_trend';
   else if(Math.abs(macdD.hist)<0.001*price) regime='sideways';
   // Cechy potrzebne dla GBM (te same co analyzeSwing)
-  var bodyRatio = Math.abs(closes[i] - opens[i]) / (highs[i] - lows[i] + 0.000001);
+  var bodyRatio = Math.abs(closes[i] - closes[i-1]) / (highs[i] - lows[i] + 0.000001);
   var confirm1h = (rsiD > 50 && macdD.hist > 0) ? 1 : 0; // uproszczone potwierdzenie (brak osobnych danych 1H w backteście)
   var obiRatio = 0.5; // OBI niedostępne w backteście — neutralna wartość
   return { rsiD:rsiD, macdHist:macdD.hist, macdLine:macdD.line, bbPos:bbD.pos, trendD:trendD, mom5:mom5, mom10:mom10, atrVal:atr(h,l,c,14), price:price, volR:volR, regime:regime,
