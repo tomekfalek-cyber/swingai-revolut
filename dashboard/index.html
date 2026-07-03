@@ -2803,7 +2803,6 @@ function saveSettings() {
   const pbVal = parseFloat(gi('cfg-paper-bal').value);
   if(!isFinite(pbVal) || pbVal < 0) { errors.push('Saldo paper: wprowadź poprawną liczbę'); }
   else CFG.paperBal = pbVal;
-  if(errors.length>0){gi('cfg-status').innerHTML='<span style="color:var(--red)">Błąd: '+errors.join('; ')+'</span>';return;}
   CFG.minScore=rawScore;CFG.riskPct=rawRisk;CFG.fgMin=isFinite(rawFG)?rawFG:20;
   CFG.tgToken=gi('cfg-tg-token').value.trim();CFG.tgChat=gi('cfg-tg-chat').value.trim();
   saveCfg();
@@ -2834,14 +2833,7 @@ function resetAll() {
   gi('cfg-status').textContent='Reset'; log('Dane zresetowane','warn');
 }
 function deleteApiKeys() {
-  if (!confirm('Usunac klucze API gieldy i Telegrama?
-
-- Revolut X API Key
-- Revolut X Private Key
-- Telegram Bot Token
-- Telegram Chat ID
-
-Ustawienia bota pozostaja.')) return;
+  if (!confirm('Usunac klucze API gieldy i Telegrama?\n\n- Revolut X API Key\n- Revolut X Private Key\n- Telegram Bot Token\n- Telegram Chat ID\n\nUstawienia bota pozostaja.')) return;
   CFG.revxApiKey=''; CFG.revxPrivKey=''; CFG.tgToken=''; CFG.tgChat='';
   saveCfg();
   gi('cfg-revx-key').value=''; gi('cfg-revx-priv').value='';
