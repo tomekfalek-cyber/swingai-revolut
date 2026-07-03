@@ -1,4 +1,4 @@
-﻿// SwingAI Bot 24/7 — Cloudflare Worker — REVOLUT X VERSION
+// SwingAI Bot 24/7 — Cloudflare Worker — REVOLUT X VERSION
 // Multi-TF (Daily+4H+1H), NB+GBM+QL, PATTERNS, Kelly, ATR-TP/SL, CORR, OBI
 // Market data: Gate.io (public) | Execution: Revolut X (Ed25519)
 
@@ -259,6 +259,17 @@ async function runBotCycle(env) {
   const cfg   = await getConfig(env);
   if (!cfg.active) return;
   const state = await getState(env);
+
+  // Mutex — zapobiega równoległemu uruchomieniu dwóch cykli
+  const lockKey = 'bot_running_lock';
+  const lockVal = await env.SWINGAI_REVOLUT_KV.get(lockKey);
+  if (lockVal) {
+    console.log('Bot already running, skipping cycle');
+    return;
+  }
+  await env.SWINGAI_REVOLUT_KV.put(lockKey, '1', { expirationTtl: 120 }); // TTL 2 min auto-release
+  try {
+
   state.iter  = (state.iter || 0) + 1;
   addLog(state, '--- Skan #' + state.iter + ' ---');
 
@@ -399,6 +410,10 @@ async function runBotCycle(env) {
   }
 
   await env.SWINGAI_REVOLUT_KV.put('state', JSON.stringify(state));
+
+  } finally {
+    await env.SWINGAI_REVOLUT_KV.delete(lockKey);
+  }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -684,28 +699,27 @@ async function checkPositions(cfg, state, env, ql) {
 
       // Partial TP (50% pozycji przy połowie TP)
       const _tpPct = pos.tp > 0 ? (pos.tp - pos.entry) / pos.entry * 100 : cfg.tp * 100;
-      if (!reason && pnlPct >= _tpPct * 0.5 && !pos.partialClosed) {
+      if (!reason && pnlPct >= _tpPct * 0.5 && !pos.partialClosed && !pos.partialSelling) {
+        pos.partialSelling = true;
         const halfQty = pos.qty / 2;
         const halfPnl = (price - pos.entry) * halfQty;
         const halfSize = pos.size / 2;
-        let partialOk = true;
-        if (cfg.mode === 'live' && cfg.revxApiKey && cfg.revxPrivKey) {
-          try {
+        try {
+          if (cfg.mode === 'live' && cfg.revxApiKey && cfg.revxPrivKey) {
             await revxMarketSell(pos.sym, halfQty, cfg);
-          } catch(e) {
-            addLog(state, 'PARTIAL SELL FAILED ' + pos.sym + ': ' + e.message, 'err');
-            partialOk = false;
           }
-        }
-        if (partialOk) {
           pos.qty = halfQty;
           pos.size = halfSize;
           pos.partialClosed = true;
+          pos.partialSelling = false;
           pos.sl = pos.entry * (1 + FEE * 2);
           if (cfg.mode === 'paper') {
             state.paperBalance = (state.paperBalance || 0) + halfSize + halfPnl;
           }
           addLog(state, 'PARTIAL TP ' + pos.sym + ' +$' + halfPnl.toFixed(2) + ' (' + pnlPct.toFixed(1) + '%) — reszta jedzie dalej', 'ok');
+        } catch(e) {
+          pos.partialSelling = false;
+          addLog(state, 'Partial TP SELL error: ' + e.message, 'err');
         }
       }
 
@@ -723,6 +737,7 @@ async function checkPositions(cfg, state, env, ql) {
       }
     } catch(e) {
       addLog(state, 'checkPos ' + pos.sym + ': ' + e.message, 'err');
+      pos.closing = false;
       updated.push(pos);
     }
     await sleep(150);
@@ -1200,7 +1215,10 @@ function makeGBM(saved) {
       trades.forEach(t => { if (t.gbmFeatures&&t.gbmFeatures.length===12) { X.push(t.gbmFeatures); y.push(t.pnl>0?1:0); } });
       if (X.length < 20) return false;
       const si = Math.floor(X.length*0.7);
-      const Xt=X.slice(0,si), yt=y.slice(0,si);
+      // train = najstarsze 70% (chronologicznie pierwsze), OOS = najnowsze 30% (nieznane podczas treningu)
+      // trades posortowane najnowszy→najstarszy, więc X[0]=najnowszy → slice(si) = stare, slice(0,si) = nowe
+      const Xt=X.slice(si), yt=y.slice(si);
+      const Xoos=X.slice(0,si), yoos=y.slice(0,si);
       this.trees=[];
       let F = new Array(Xt.length).fill(0.5);
       for (let t=0;t<20;t++) {
@@ -1213,11 +1231,11 @@ function makeGBM(saved) {
       const ok = F.filter((f,i)=>(f>0.5?1:0)===yt[i]).length;
       this.accuracy = +(ok/Xt.length*100).toFixed(1);
       let oosOk = 0;
-      for (let i = si; i < X.length; i++) {
-        const pred = predictFromTrees(this.trees, this.lr, X[i]);
-        if ((pred > 0.5 ? 1 : 0) === y[i]) oosOk++;
+      for (let i = 0; i < Xoos.length; i++) {
+        const pred = predictFromTrees(this.trees, this.lr, Xoos[i]);
+        if ((pred > 0.5 ? 1 : 0) === yoos[i]) oosOk++;
       }
-      this.accuracyOOS = X.length > si ? +(oosOk / (X.length - si) * 100).toFixed(1) : 0;
+      this.accuracyOOS = Xoos.length > 0 ? +(oosOk / Xoos.length * 100).toFixed(1) : 0;
       this.trained = true;
       return true;
     },
@@ -1661,3 +1679,4 @@ function redirectHTML(msg) {
 <style>body{background:#020810;color:#00e5a0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:1.4em;flex-direction:column;gap:12px;}</style>
 </head><body><div>${msg}</div><div style="color:#334d74;font-size:0.5em">Przekierowanie za 2 sekundy...</div></body></html>`;
 }
+
