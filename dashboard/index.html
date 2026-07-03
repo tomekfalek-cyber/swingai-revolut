@@ -863,7 +863,7 @@ async function tgSend(msg) {
   if (!CFG.tgToken || !CFG.tgChat || !msg) return;
   msg = msg.substring(0, 4000);
   try {
-    await fetch((CFG.workerUrl||'https://swingai-bot-24h.tomek-falek.workers.dev').replace(/\/+$/,'')+'/tg-send?auth='+encodeURIComponent(CFG.authToken||'swingai-revolut-2024'), {
+    await fetch((CFG.workerUrl||'https://swingai-revolut.tomek-falek.workers.dev').replace(/\/+$/,'')+'/tg-send?auth='+encodeURIComponent(CFG.authToken||'swingai-revolut-2024'), {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({chat_id:CFG.tgChat, text:msg, parse_mode:'HTML'})
     });
@@ -1304,13 +1304,13 @@ async function pub(path, params={}) {
 }
 async function getKlines(sym,tf,limit){
   limit=limit||200;const gSym=sym.includes('_')?sym:(sym.replace('USDC','')+'_USDC');const tfMap={'1d':'1d','4h':'4h','1h':'1h','15m':'15m'};const gTf=tfMap[tf]||'1d';
-  const url='https://swingai-bot-24h.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/candlesticks')+'&qs='+encodeURIComponent('currency_pair='+gSym+'&interval='+gTf+'&limit='+limit);
+  const url='https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/candlesticks')+'&qs='+encodeURIComponent('currency_pair='+gSym+'&interval='+gTf+'&limit='+limit);
   const r=await fetchWithTimeout(url,15000);const d=await r.json();
   return d.map(function(k){return [+k[0]*1000,+k[5],+k[3],+k[4],+k[2],+k[1]];});
 }
 async function getTicker(sym){
   const gSym=sym.includes('_')?sym:(sym.replace('USDC','')+'_USDC');
-  const url='https://swingai-bot-24h.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair='+gSym);
+  const url='https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair='+gSym);
   const r=await fetchWithTimeout(url,10000);
   if(!r.ok) throw new Error('getTicker HTTP '+r.status+' '+sym);
   const d=await r.json();const t=(Array.isArray(d)?d:[])[0]||{};
@@ -2822,7 +2822,7 @@ async function testConn() {
   const url=(gi('cfg-worker').value||'').trim().replace(/\/+/,'');
   const tok=(gi('cfg-auth-token').value||'swingai-revolut-2024').trim();
   const lines=[];
-  try{const pb=(url||'https://swingai-bot-24h.tomek-falek.workers.dev').replace(/\/+$/,'');const r=await fetch(pb+'/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair=BTC_USDC'),{signal:AbortSignal.timeout(10000)});const d=await r.json();const btc=(Array.isArray(d)?d:[])[0];lines.push('Gate.io OK | BTC: $'+(btc?(+btc.last).toFixed(0):'?'));}catch(e){lines.push('Gate.io ERR: '+e.message);}
+  try{const pb=(url||'https://swingai-revolut.tomek-falek.workers.dev').replace(/\/+$/,'');const r=await fetch(pb+'/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair=BTC_USDC'),{signal:AbortSignal.timeout(10000)});const d=await r.json();const btc=(Array.isArray(d)?d:[])[0];lines.push('Gate.io OK | BTC: $'+(btc?(+btc.last).toFixed(0):'?'));}catch(e){lines.push('Gate.io ERR: '+e.message);}
   if(url){try{const r=await fetch(url+'/status?auth='+encodeURIComponent(tok),{signal:AbortSignal.timeout(10000)});if(r.ok){const d=await r.json();lines.push('Worker OK | tryb: '+(d.config&&d.config.mode||'?')+' iter: '+(d.state&&d.state.iter||0));if(d.state&&d.state.liveBalance)lines.push('Saldo USDC: $'+d.state.liveBalance.toFixed(2));}else{lines.push('Worker HTTP '+r.status);}}catch(e){lines.push('Worker ERR: '+e.message);}}else{lines.push('Brak Worker URL');}
   s.innerHTML=lines.map(function(l){return (l.indexOf('OK')>=0)?'<span style="color:var(--green)">'+l+'</span>':'<span style="color:var(--red)">'+l+'</span>';}).join('<br>');
 }
@@ -2874,7 +2874,7 @@ var OBI = {
       {
         // Gate.io orderbook
         var gSym = sym.includes('_') ? sym : sym.replace('/','_');
-        var d=await fetchWithTimeout('https://swingai-bot-24h.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/order_book')+'&qs='+encodeURIComponent('currency_pair='+gSym+'&limit=20'),10000);
+        var d=await fetchWithTimeout('https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/order_book')+'&qs='+encodeURIComponent('currency_pair='+gSym+'&limit=20'),10000);
         var dj = await d.json();
         var bidVol = (dj.bids||[]).reduce(function(s,b){ var v=(parseFloat(b[0])||0)*(parseFloat(b[1])||0); return s+(isFinite(v)?v:0); }, 0);
         var askVol = (dj.asks||[]).reduce(function(s,a){ var v=(parseFloat(a[0])||0)*(parseFloat(a[1])||0); return s+(isFinite(v)?v:0); }, 0);
