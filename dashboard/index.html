@@ -2278,7 +2278,7 @@ async function botCycle() {
   for (let i=0; i<PAIRS.length; i++) {
     if (!running) break;
     gi('scan-progress').textContent = PAIRS[i].replace('USDC','')+'...';
-    try { const s = await analyzeSwing(PAIRS[i]); sigs.push(s); await sleep(300); }
+    try { const s = await analyzeSwing(PAIRS[i]); sigs.push(s); await sleep(1200); }
     catch(e) { log(PAIRS[i]+': '+e.message,'warn'); }
   }
   gi('scan-progress').textContent = 'gotowe';
