@@ -1302,13 +1302,18 @@ async function pub(path, params={}) {
 }
 async function getKlines(sym,tf,limit){
   limit=limit||200;const gSym=sym.includes('_')?sym:(sym.replace('USDC','')+'_USDC');const tfMap={'1d':'1d','4h':'4h','1h':'1h','15m':'15m'};const gTf=tfMap[tf]||'1d';
-  const url='https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair='+gSym+'&interval='+gTf+'&limit='+limit;
+  const _gpath='/api/v4/spot/candlesticks',_gqs='currency_pair='+gSym+'&interval='+gTf+'&limit='+limit;
+  const _gproxy=CFG.workerUrl?CFG.workerUrl.replace(/\/+$/,''):null;
+  const url=_gproxy?_gproxy+'/market?path='+encodeURIComponent(_gpath)+'&qs='+encodeURIComponent(_gqs):'https://api.gateio.ws'+_gpath+'?'+_gqs;
   const r=await fetchWithTimeout(url,15000);const d=await r.json();
   return d.map(function(k){return [+k[0]*1000,+k[5],+k[3],+k[4],+k[2],+k[1]];});
 }
 async function getTicker(sym){
   const gSym=sym.includes('_')?sym:(sym.replace('USDC','')+'_USDC');
-  const r=await fetchWithTimeout('https://api.gateio.ws/api/v4/spot/tickers?currency_pair='+gSym,10000);const d=await r.json();const t=(d||[])[0]||{};
+  const _tpath='/api/v4/spot/tickers',_tqs='currency_pair='+gSym;
+  const _tproxy=CFG.workerUrl?CFG.workerUrl.replace(/\/+$/,''):null;
+  const _turl=_tproxy?_tproxy+'/market?path='+encodeURIComponent(_tpath)+'&qs='+encodeURIComponent(_tqs):'https://api.gateio.ws'+_tpath+'?'+_tqs;
+  const r=await fetchWithTimeout(_turl,10000);const d=await r.json();const t=(d||[])[0]||{};
   return {lastPrice:t.last||'0',priceChangePercent:t.change_percentage||'0'};
 }
 
@@ -2816,7 +2821,7 @@ var OBI = {
       {
         // Gate.io orderbook
         var gSym = sym.includes('_') ? sym : sym.replace('/','_');
-        var d = await fetchWithTimeout('https://api.gateio.ws/api/v4/spot/order_book?currency_pair='+gSym+'&limit=20', 10000);
+        var _opath='/api/v4/spot/order_book',_oqs='currency_pair='+gSym+'&limit=20';var _oproxy=CFG.workerUrl?CFG.workerUrl.replace(/\/+$/,''):null;var _ourl=_oproxy?_oproxy+'/market?path='+encodeURIComponent(_opath)+'&qs='+encodeURIComponent(_oqs):'https://api.gateio.ws'+_opath+'?'+_oqs;var d=await fetchWithTimeout(_ourl,10000);
         var dj = await d.json();
         var bidVol = (dj.bids||[]).reduce(function(s,b){ var v=(parseFloat(b[0])||0)*(parseFloat(b[1])||0); return s+(isFinite(v)?v:0); }, 0);
         var askVol = (dj.asks||[]).reduce(function(s,a){ var v=(parseFloat(a[0])||0)*(parseFloat(a[1])||0); return s+(isFinite(v)?v:0); }, 0);
