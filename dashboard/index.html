@@ -180,7 +180,7 @@ tr:hover td{background:rgba(123,97,255,.04);}
 .pill-pos{background:rgba(0,229,160,.1);color:var(--green);border:1px solid rgba(0,229,160,.25);}
 
 /* ── TABS ── */
-#ctb{background:var(--bg2);border-bottom:1px solid var(--border);padding:6px 12px;display:flex;align-items:center;gap:4px;flex-shrink:0;}
+#ctb{background:var(--bg2);border-bottom:1px solid var(--border);padding:6px 12px;display:flex;align-items:center;gap:4px;flex-shrink:0;overflow-x:auto;-webkit-overflow-scrolling:touch;}#ctb::-webkit-scrollbar{height:3px}
 .tab-btn{padding:4px 12px;border-radius:20px;cursor:pointer;font-size:8.5pt;color:var(--text2);border:1px solid transparent;background:transparent;transition:all .15s;}
 .tab-btn:hover:not(.on){color:var(--text);background:rgba(255,255,255,.04);}
 .tab-btn.on{background:rgba(123,97,255,.15);color:var(--accent);border-color:var(--border2);}
@@ -325,6 +325,8 @@ tr:hover td{background:rgba(123,97,255,.04);}
   .form-row label{min-width:unset;}
   .form-row input,.form-row select{width:100%;}
   button.go{padding:5px 14px;}
+  #tab-ml>div:first-child{grid-template-columns:1fr !important;}
+  #tab-backtest>div:first-child{grid-template-columns:1fr !important;}
 }
 </style>
 </head>
@@ -447,11 +449,11 @@ tr:hover td{background:rgba(123,97,255,.04);}
         <span id="inline-chart-price" style="margin-left:auto;font-size:11pt;font-weight:900;font-family:'JetBrains Mono',monospace;color:var(--text)"></span>
         <span id="inline-chart-chg" style="font-size:9pt;font-weight:700;font-family:'JetBrains Mono',monospace;margin-left:6px"></span>
       </div>
+      <div style="flex-shrink:0;padding:10px 14px;background:rgba(255,95,0,0.04);border-bottom:1px solid var(--border);font-size:8.5pt;line-height:1.8;color:var(--text2);" id="inline-chart-signal">
+        Wybierz parę i kliknij — <span style="color:var(--accent)">📊 Wykres</span> aby zobaczyć wykres i sygnał AI
+      </div>
       <div style="flex:1;overflow:hidden;padding:8px 12px;min-height:0;">
         <canvas id="inline-candle-canvas" style="width:100%;height:100%;background:var(--bg3);border-radius:8px;border:1px solid var(--border);display:block;"></canvas>
-      </div>
-      <div id="inline-chart-signal" style="flex-shrink:0;padding:10px 14px;background:rgba(255,95,0,0.04);border-top:1px solid var(--border);font-size:8.5pt;line-height:1.8;color:var(--text2);">
-        Wybierz parę i kliknij — <span style="color:var(--accent)">📊 Wykres</span> aby zobaczyć wykres i sygnał AI
       </div>
     </div>
 
