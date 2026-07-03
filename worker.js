@@ -186,6 +186,23 @@ export default {
       }
     }
 
+    if (url.pathname === '/tg-send') {
+      if (!isAuth) return new Response('Unauthorized', { status: 401, headers: corsHeaders() });
+      const cfg = await getConfig(env);
+      if (!cfg.tgToken || !cfg.tgChat) return jsonResp({ ok: false, error: 'Brak tokenu Telegram' });
+      let msg = '';
+      try { const body = await request.json(); msg = body.text || ''; } catch(e) { msg = url.searchParams.get('text') || ''; }
+      if (!msg) return jsonResp({ ok: false, error: 'Brak treści wiadomości' });
+      try {
+        const tgR = await fetch('https://api.telegram.org/bot' + cfg.tgToken + '/sendMessage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: cfg.tgChat, text: msg, parse_mode: 'HTML' })
+        });
+        const tgD = await tgR.json();
+        return jsonResp({ ok: tgD.ok, result: tgD });
+      } catch(e) { return jsonResp({ ok: false, error: e.message }); }
+    }
+
     if (url.pathname === '/tg-test') {
       const cfg = await getConfig(env);
       const payload = { chat_id: cfg.tgChat, text: 'SwingAI Revolut X — test', parse_mode: 'HTML' };
