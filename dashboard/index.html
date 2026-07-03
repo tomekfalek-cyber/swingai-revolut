@@ -2803,6 +2803,7 @@ function saveSettings() {
   const pbVal = parseFloat(gi('cfg-paper-bal').value);
   if(!isFinite(pbVal) || pbVal < 0) { errors.push('Saldo paper: wprowadź poprawną liczbę'); }
   else CFG.paperBal = pbVal;
+  if(errors.length>0){gi('cfg-status').innerHTML='<span style="color:var(--red)">Błąd: '+errors.join('; ')+'</span>';return;}
   CFG.minScore=rawScore;CFG.riskPct=rawRisk;CFG.fgMin=isFinite(rawFG)?rawFG:20;
   CFG.tgToken=gi('cfg-tg-token').value.trim();CFG.tgChat=gi('cfg-tg-chat').value.trim();
   saveCfg();
@@ -2821,7 +2822,7 @@ async function testConn() {
   const url=(gi('cfg-worker').value||'').trim().replace(/\/+/,'');
   const tok=(gi('cfg-auth-token').value||'swingai-revolut-2024').trim();
   const lines=[];
-  const proxyBase=(url||'https://swingai-bot-24h.tomek-falek.workers.dev').replace(/\/+$/,'');try{const r=await fetch(proxyBase+'/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair=BTC_USDC'),{signal:AbortSignal.timeout(10000)});const d=await r.json();const btc=(Array.isArray(d)?d:[])[0];lines.push('Gate.io OK | BTC: $'+(btc?(+btc.last).toFixed(0):'?'));}catch(e){lines.push('Gate.io ERR: '+e.message);}
+  try{const pb=(url||'https://swingai-bot-24h.tomek-falek.workers.dev').replace(/\/+$/,'');const r=await fetch(pb+'/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair=BTC_USDC'),{signal:AbortSignal.timeout(10000)});const d=await r.json();const btc=(Array.isArray(d)?d:[])[0];lines.push('Gate.io OK | BTC: $'+(btc?(+btc.last).toFixed(0):'?'));}catch(e){lines.push('Gate.io ERR: '+e.message);}
   if(url){try{const r=await fetch(url+'/status?auth='+encodeURIComponent(tok),{signal:AbortSignal.timeout(10000)});if(r.ok){const d=await r.json();lines.push('Worker OK | tryb: '+(d.config&&d.config.mode||'?')+' iter: '+(d.state&&d.state.iter||0));if(d.state&&d.state.liveBalance)lines.push('Saldo USDC: $'+d.state.liveBalance.toFixed(2));}else{lines.push('Worker HTTP '+r.status);}}catch(e){lines.push('Worker ERR: '+e.message);}}else{lines.push('Brak Worker URL');}
   s.innerHTML=lines.map(function(l){return (l.indexOf('OK')>=0)?'<span style="color:var(--green)">'+l+'</span>':'<span style="color:var(--red)">'+l+'</span>';}).join('<br>');
 }
@@ -2832,16 +2833,7 @@ function resetAll() {
   saveAll(); renderPositions(); renderHistory(); renderStats();
   gi('cfg-status').textContent='Reset'; log('Dane zresetowane','warn');
 }
-function deleteApiKeys() {
-  if (!confirm('Usunac klucze API gieldy i Telegrama?\n\n- Revolut X API Key\n- Revolut X Private Key\n- Telegram Bot Token\n- Telegram Chat ID\n\nUstawienia bota pozostaja.')) return;
-  CFG.revxApiKey=''; CFG.revxPrivKey=''; CFG.tgToken=''; CFG.tgChat='';
-  saveCfg();
-  gi('cfg-revx-key').value=''; gi('cfg-revx-priv').value='';
-  gi('cfg-tg-token').value=''; gi('cfg-tg-chat').value='';
-  gi('cfg-status').textContent='Klucze usuniete'; gi('cfg-status').style.color='var(--red)';
-  log('Klucze API i Telegram usuniete z localStorage','warn');
-}
-
+function deleteApiKeys(){if(!confirm('Usunac klucze Revolut X i Telegrama? Ustawienia bota pozostaja.'))return;CFG.revxApiKey='';CFG.revxPrivKey='';CFG.tgToken='';CFG.tgChat='';saveCfg();gi('cfg-revx-key').value='';gi('cfg-revx-priv').value='';gi('cfg-tg-token').value='';gi('cfg-tg-chat').value='';gi('cfg-status').textContent='Klucze usuniete';gi('cfg-status').style.color='var(--red)';log('Klucze API usuniete','warn');}
 function closeOverlay(id) { gi(id).className='overlay'; }
 document.querySelectorAll('.overlay').forEach(function(o){ o.addEventListener('click',function(e){ if(e.target===o) o.className='overlay'; }); });
 
@@ -3635,7 +3627,7 @@ function calcIndicatorsForCandle(closes, highs, lows, i, volumes) {
   else if(trendD===-1) regime='bear_trend';
   else if(Math.abs(macdD.hist)<0.001*price) regime='sideways';
   // Cechy potrzebne dla GBM (te same co analyzeSwing)
-  var bodyRatio = Math.abs(closes[i] - closes[i-1]) / (highs[i] - lows[i] + 0.000001);
+  var bodyRatio = Math.abs(closes[i] - opens[i]) / (highs[i] - lows[i] + 0.000001);
   var confirm1h = (rsiD > 50 && macdD.hist > 0) ? 1 : 0; // uproszczone potwierdzenie (brak osobnych danych 1H w backteście)
   var obiRatio = 0.5; // OBI niedostępne w backteście — neutralna wartość
   return { rsiD:rsiD, macdHist:macdD.hist, macdLine:macdD.line, bbPos:bbD.pos, trendD:trendD, mom5:mom5, mom10:mom10, atrVal:atr(h,l,c,14), price:price, volR:volR, regime:regime,
