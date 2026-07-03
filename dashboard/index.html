@@ -453,7 +453,7 @@ tr:hover td{background:rgba(123,97,255,.04);}
         Wybierz parę i kliknij — <span style="color:var(--accent)">📊 Wykres</span> aby zobaczyć wykres i sygnał AI
       </div>
       <div style="flex:1;overflow:hidden;padding:8px 12px;min-height:0;">
-        <canvas id="inline-candle-canvas" style="width:100%;height:100%;background:var(--bg3);border-radius:8px;border:1px solid var(--border);display:block;"></canvas>
+        <canvas id="inline-candle-canvas" style="width:100%;height:100%;min-height:320px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);display:block;"></canvas>
       </div>
     </div>
 
@@ -567,7 +567,7 @@ tr:hover td{background:rgba(123,97,255,.04);}
           </div>
           <div class="r2" style="margin-bottom:6px"><span class="lbl">Para treningowa</span>
             <select id="ml-sym" style="width:110px">
-              <option value="BTC_USDC">BTC_USDC</option><option value="ETH_USDC">ETH_USDC</option><option selected>SOLUSDC</option><option value="XRP_USDC">XRP_USDC</option>
+              <option value="BTC_USDC">BTC_USDC</option><option value="ETH_USDC">ETH_USDC</option><option value="SOL_USDC" selected>SOL_USDC</option><option value="XRP_USDC">XRP_USDC</option>
             </select>
           </div>
           <div class="r2" style="margin-bottom:6px"><span class="lbl">Dni danych</span>
@@ -2677,10 +2677,10 @@ function drawEquity() {
 
 function renderMarketTab(sigs) {
   if (!sigs || !sigs.length) return;
-  const btc=sigs.find(function(s){ return s.sym==='BTCUSDC'; }); if(!btc) return;
+  const btc=sigs.find(function(s){ return s.sym==='BTC_USDC'; }); if(!btc) return;
   gi('mkt-btc-trend').innerHTML = btc.trendD===2?'<span class="up">Bull mocny</span>':btc.trendD===1?'<span class="up">Bull</span>':btc.trendD===0?'<span class="gold">Boczny</span>':'<span class="dn">Bear</span>';
   gi('mkt-btc-rsi').innerHTML = btc.rsiD<=32?'<span class="up">'+btc.rsiD+' (oversold)</span>':btc.rsiD>=68?'<span class="dn">'+btc.rsiD+' (overbought)</span>':'<span class="neu">'+btc.rsiD+'</span>';
-  const altBuys=sigs.filter(function(s){ return s.sym!=='BTCUSDC'&&s.buy; }).length;
+  const altBuys=sigs.filter(function(s){ return s.sym!=='BTC_USDC'&&s.buy; }).length;
   gi('mkt-alts').innerHTML = altBuys>2?'<span class="up">'+altBuys+' BUY</span>':altBuys>0?'<span class="gold">'+altBuys+' BUY</span>':'<span class="dn">Brak</span>';
   const reg=sigs.filter(function(s){ return s.trendD>=1; }).length;
   gi('mkt-regime').innerHTML = reg>=9?'<span class="up">Byczo ('+reg+'/'+sigs.length+')</span>':reg>=5?'<span class="gold">Mieszany</span>':'<span class="dn">Niedzwiedzi</span>';
@@ -4717,7 +4717,7 @@ document.addEventListener('DOMContentLoaded', function() {
             renderSigList();
           }
         } catch(e2) {}
-        await sleep(400);
+        await sleep(1500);
       }
       log('Auto-analiza zakończona', 'ok');
     })();
