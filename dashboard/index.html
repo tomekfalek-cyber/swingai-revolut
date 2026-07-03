@@ -3602,7 +3602,7 @@ function loadMLWeights() {
   } catch(e) {}
 }
 
-function calcIndicatorsForCandle(closes, highs, lows, i, volumes) {
+function calcIndicatorsForCandle(closes, highs, lows, i, volumes, opens) {
   // Wymaga min 35 świec wstecz
   if (i < 35) return null;
   var c  = closes.slice(0, i+1);
@@ -3627,7 +3627,7 @@ function calcIndicatorsForCandle(closes, highs, lows, i, volumes) {
   else if(trendD===-1) regime='bear_trend';
   else if(Math.abs(macdD.hist)<0.001*price) regime='sideways';
   // Cechy potrzebne dla GBM (te same co analyzeSwing)
-  var bodyRatio = Math.abs(closes[i] - opens[i]) / (highs[i] - lows[i] + 0.000001);
+  var bodyRatio = Math.abs(closes[i] - (opens ? opens[i] : closes[i])) / (highs[i] - lows[i] + 0.000001);
   var confirm1h = (rsiD > 50 && macdD.hist > 0) ? 1 : 0; // uproszczone potwierdzenie (brak osobnych danych 1H w backteście)
   var obiRatio = 0.5; // OBI niedostępne w backteście — neutralna wartość
   return { rsiD:rsiD, macdHist:macdD.hist, macdLine:macdD.line, bbPos:bbD.pos, trendD:trendD, mom5:mom5, mom10:mom10, atrVal:atr(h,l,c,14), price:price, volR:volR, regime:regime,
@@ -3695,6 +3695,7 @@ async function runBacktest() {
     var highs   = klines.map(function(k){ return +k[2]; });
     var lows    = klines.map(function(k){ return +k[3]; });
     var volumes = klines.map(function(k){ return +k[5]; });
+    var opens   = klines.map(function(k){ return +k[1]; });
     var dates   = klines.map(function(k){ return new Date(+k[0]).toLocaleDateString('pl-PL'); });
     var n = closes.length;
     if (n < 40) { gi('bt-progress').textContent = 'Za malo danych ('+n+' swiec) — wybierz dluzszy okres'; btn.disabled=false; btn.textContent='▶ Uruchom backtest'; return; }
@@ -3743,7 +3744,7 @@ async function runBacktest() {
       // Sygnał obliczamy na close[i], ale wejście dopiero na open[i+1] — brak look-ahead
       if (i + 1 >= n) continue;
 
-      var ind = calcIndicatorsForCandle(closes, highs, lows, i, volumes);
+      var ind = calcIndicatorsForCandle(closes, highs, lows, i, volumes, opens);
       if (!ind) continue;
       var sc = scoreCandle(ind, mlWeights);
       if (sc > maxScoreSeen) maxScoreSeen = sc;
@@ -3879,13 +3880,14 @@ async async function runMLOptimize() {
     var highs   = klines.map(function(k){ return +k[2]; });
     var lows    = klines.map(function(k){ return +k[3]; });
     var volumes = klines.map(function(k){ return +k[5]; });
+    var opens   = klines.map(function(k){ return +k[1]; });
     var n = closes.length;
     gi('ml-progress').textContent = 'Budowanie datasetu z '+n+' swiec...';
 
     // Zbuduj dataset: X = [rsiD, macdHist, bbPos, trendD, mom5, mom10], y = 1 jesli cena wrosla o >target% w ciagu 10 dni
     var X = [], y = [];
     for (var i=35; i<n-10; i++) {
-      var ind = calcIndicatorsForCandle(closes, highs, lows, i, volumes);
+      var ind = calcIndicatorsForCandle(closes, highs, lows, i, volumes, opens);
       if (!ind) continue;
       var future = closes[i+10];
       var label  = (future/closes[i]-1) >= target ? 1 : 0;
@@ -4051,6 +4053,7 @@ async function trainAllAI() {
     var highs   = klines.map(function(k){ return +k[2]; });
     var lows    = klines.map(function(k){ return +k[3]; });
     var volumes = klines.map(function(k){ return +k[5]; });
+    var opens   = klines.map(function(k){ return +k[1]; });
     var n = closes.length;
     gi('ml-progress').textContent = 'Budowanie datasetu z '+n+' dni...';
 
@@ -4058,7 +4061,7 @@ async function trainAllAI() {
     var synTrades = [];
     var X_gbm = [], y_gbm = [];
     for (var i=35; i<n-10; i++) {
-      var ind = calcIndicatorsForCandle(closes, highs, lows, i, volumes);
+      var ind = calcIndicatorsForCandle(closes, highs, lows, i, volumes, opens);
       if (!ind) continue;
       var futureRet = (closes[i+10]/closes[i])-1;
       var label = futureRet >= targetPct ? 1 : 0;
