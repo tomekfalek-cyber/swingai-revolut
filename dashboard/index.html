@@ -705,7 +705,7 @@ tr:hover td{background:rgba(123,97,255,.04);}
   <div style="font-size:8.5pt;color:var(--text2);margin-bottom:8px">&#128241; Telegram (opcjonalne)</div>
   <div class="form-row"><label>Bot Token</label><input id="cfg-tg-token" type="password" placeholder="123456:ABC-DEF..."></div>
   <div class="form-row"><label>Chat ID</label><input id="cfg-tg-chat" type="text" placeholder="-100123456"></div>
-  <div class="modal-btns"><button class="go" onclick="saveSettings()">&#128190; Zapisz</button><button onclick="testConn()">&#128299; Test</button><button class="stop-btn" onclick="resetAll()">&#128465; Reset</button><button onclick="closeOverlay('modal-cfg')" style="margin-left:auto">Zamknij</button></div>
+  <div class="modal-btns"><button class="go" onclick="saveSettings()">&#128190; Zapisz</button><button onclick="testConn()">&#128299; Test</button><button class="stop-btn" onclick="deleteApiKeys()">&#128273; Usuń klucze</button><button class="stop-btn" onclick="resetAll()">&#128465; Reset</button><button onclick="closeOverlay('modal-cfg')" style="margin-left:auto">Zamknij</button></div>
   <div id="cfg-status" style="margin-top:8px;font-size:9pt;min-height:18px;color:var(--text2)"></div>
 </div></div>
 
@@ -863,7 +863,7 @@ async function tgSend(msg) {
   if (!CFG.tgToken || !CFG.tgChat || !msg) return;
   msg = msg.substring(0, 4000);
   try {
-    await fetch('https://api.telegram.org/bot'+CFG.tgToken+'/sendMessage', {
+    await fetch((CFG.workerUrl||'https://swingai-bot-24h.tomek-falek.workers.dev').replace(/\/+$/,'')+'/tg-send?auth='+encodeURIComponent(CFG.authToken||'swingai-revolut-2024'), {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({chat_id:CFG.tgChat, text:msg, parse_mode:'HTML'})
     });
@@ -2822,7 +2822,7 @@ async function testConn() {
   const url=(gi('cfg-worker').value||'').trim().replace(/\/+/,'');
   const tok=(gi('cfg-auth-token').value||'swingai-revolut-2024').trim();
   const lines=[];
-  try{const r=await fetch('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDC');const d=await r.json();const btc=(d||[])[0];lines.push('Gate.io OK | BTC: $'+(btc?(+btc.last).toFixed(0):'?'));}catch(e){lines.push('Gate.io ERR: '+e.message);}
+  const proxyBase=(url||'https://swingai-bot-24h.tomek-falek.workers.dev').replace(/\/+$/,'');try{const r=await fetch(proxyBase+'/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair=BTC_USDC'),{signal:AbortSignal.timeout(10000)});const d=await r.json();const btc=(Array.isArray(d)?d:[])[0];lines.push('Gate.io OK | BTC: $'+(btc?(+btc.last).toFixed(0):'?'));}catch(e){lines.push('Gate.io ERR: '+e.message);}
   if(url){try{const r=await fetch(url+'/status?auth='+encodeURIComponent(tok),{signal:AbortSignal.timeout(10000)});if(r.ok){const d=await r.json();lines.push('Worker OK | tryb: '+(d.config&&d.config.mode||'?')+' iter: '+(d.state&&d.state.iter||0));if(d.state&&d.state.liveBalance)lines.push('Saldo USDC: $'+d.state.liveBalance.toFixed(2));}else{lines.push('Worker HTTP '+r.status);}}catch(e){lines.push('Worker ERR: '+e.message);}}else{lines.push('Brak Worker URL');}
   s.innerHTML=lines.map(function(l){return (l.indexOf('OK')>=0)?'<span style="color:var(--green)">'+l+'</span>':'<span style="color:var(--red)">'+l+'</span>';}).join('<br>');
 }
@@ -2833,6 +2833,23 @@ function resetAll() {
   saveAll(); renderPositions(); renderHistory(); renderStats();
   gi('cfg-status').textContent='Reset'; log('Dane zresetowane','warn');
 }
+function deleteApiKeys() {
+  if (!confirm('Usunac klucze API gieldy i Telegrama?
+
+- Revolut X API Key
+- Revolut X Private Key
+- Telegram Bot Token
+- Telegram Chat ID
+
+Ustawienia bota pozostaja.')) return;
+  CFG.revxApiKey=''; CFG.revxPrivKey=''; CFG.tgToken=''; CFG.tgChat='';
+  saveCfg();
+  gi('cfg-revx-key').value=''; gi('cfg-revx-priv').value='';
+  gi('cfg-tg-token').value=''; gi('cfg-tg-chat').value='';
+  gi('cfg-status').textContent='Klucze usuniete'; gi('cfg-status').style.color='var(--red)';
+  log('Klucze API i Telegram usuniete z localStorage','warn');
+}
+
 function closeOverlay(id) { gi(id).className='overlay'; }
 document.querySelectorAll('.overlay').forEach(function(o){ o.addEventListener('click',function(e){ if(e.target===o) o.className='overlay'; }); });
 
