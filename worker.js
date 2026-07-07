@@ -30,7 +30,7 @@ const PAIR_PARAMS_DEFAULT = {
 };
 
 // Revolut X base URL
-const REVX_BASE = 'https://api.revolut.com/api/1.0';
+const REVX_BASE = 'https://revx.revolut.com/api/1.0';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // GŁÓWNY HANDLER
@@ -1531,7 +1531,7 @@ async function revxSign(message, privKey) {
 async function revxRequest(method, path, body, cfg) {
   const timestamp = String(Date.now());
   // Signature message: "${timestamp}.${METHOD}.${path}${body ? '.' + JSON.stringify(body) : ''}"
-  const sigMsg = timestamp + '.' + method + '.' + path + (body ? '.' + JSON.stringify(body) : '');
+  const sigMsg = timestamp + method + path + (body ? JSON.stringify(body) : '');
 
   let privKey;
   try {
@@ -1543,10 +1543,10 @@ async function revxRequest(method, path, body, cfg) {
   const signature = await revxSign(sigMsg, privKey);
 
   const headers = {
-    'Content-Type': 'application/json',
-    'x-api-key':    cfg.revxApiKey,
-    'x-timestamp':  timestamp,
-    'x-signature':  signature
+    'Content-Type':     'application/json',
+    'X-Revx-API-Key':   cfg.revxApiKey,
+    'X-Revx-Timestamp': timestamp,
+    'X-Revx-Signature': signature
   };
 
   const opts = { method, headers };
