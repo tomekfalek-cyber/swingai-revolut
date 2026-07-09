@@ -1303,19 +1303,30 @@ async function pub(path, params={}) {
   return r.json();
 }
 async function getKlines(sym,tf,limit){
-  limit=limit||200;const gSym=sym.includes('_')?sym:(sym.replace('USDC','')+'_USDC');const tfMap={'1d':'1d','4h':'4h','1h':'1h','15m':'15m'};const gTf=tfMap[tf]||'1d';
-  const url='https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/candlesticks')+'&qs='+encodeURIComponent('currency_pair='+gSym+'&interval='+gTf+'&limit='+limit);
+  limit=limit||200;
+  const kMap={'BTC_USDC':'XBTUSDT','ETH_USDC':'ETHUSDT','SOL_USDC':'SOLUSDT','XRP_USDC':'XRPUSDT','DOGE_USDC':'XDGUSDT','ADA_USDC':'ADAUSDT','AVAX_USDC':'AVAXUSDT','LINK_USDC':'LINKUSDT'};
+  const kSym=kMap[sym]||(sym.replace('_',''));
+  const tfMap={'1d':'1440','4h':'240','1h':'60','15m':'15'};const kTf=tfMap[tf]||'60';
+  const url='https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/0/public/OHLC')+'&qs='+encodeURIComponent('pair='+kSym+'&interval='+kTf);
   const r=await fetchWithTimeout(url,15000);const d=await r.json();
-  return d.map(function(k){return [+k[0]*1000,+k[5],+k[3],+k[4],+k[2],+k[1]];});
+  if(d.error&&d.error.length) throw new Error('Kraken OHLC: '+d.error[0]);
+  const key=Object.keys(d.result||{}).find(function(k){return k!=='last';});
+  const rows=key?d.result[key]:[];
+  return rows.slice(-limit).map(function(k){return [+k[0]*1000,+k[1],+k[2],+k[3],+k[4],+k[6]];});
 }
 async function getTicker(sym){
-  const gSym=sym.includes('_')?sym:(sym.replace('USDC','')+'_USDC');
-  const url='https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/tickers')+'&qs='+encodeURIComponent('currency_pair='+gSym);
+  const kMap={'BTC_USDC':'XBTUSDT','ETH_USDC':'ETHUSDT','SOL_USDC':'SOLUSDT','XRP_USDC':'XRPUSDT','DOGE_USDC':'XDGUSDT','ADA_USDC':'ADAUSDT','AVAX_USDC':'AVAXUSDT','LINK_USDC':'LINKUSDT'};
+  const kSym=kMap[sym]||(sym.replace('_',''));
+  const url='https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/0/public/Ticker')+'&qs='+encodeURIComponent('pair='+kSym);
   const r=await fetchWithTimeout(url,10000);
   if(!r.ok) throw new Error('getTicker HTTP '+r.status+' '+sym);
-  const d=await r.json();const t=(Array.isArray(d)?d:[])[0]||{};
-  if(!t.last) throw new Error('getTicker: brak danych '+sym);
-  return {lastPrice:t.last,priceChangePercent:t.change_percentage||'0'};
+  const d=await r.json();
+  if(d.error&&d.error.length) throw new Error('getTicker Kraken: '+d.error[0]);
+  const key=Object.keys(d.result||{})[0];const t=key?d.result[key]:null;
+  if(!t) throw new Error('getTicker: brak danych '+sym);
+  const last=t.c[0];const open=t.o;
+  const changePct=open&&+open>0?((+last-+open)/+open*100).toFixed(2):'0';
+  return {lastPrice:last,priceChangePercent:changePct};
 }
 
 async function getUSDC() {
@@ -2872,16 +2883,18 @@ var OBI = {
     try {
       var result;
       {
-        // Gate.io orderbook
-        var gSym = sym.includes('_') ? sym : sym.replace('/','_');
-        var d=await fetchWithTimeout('https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/api/v4/spot/order_book')+'&qs='+encodeURIComponent('currency_pair='+gSym+'&limit=20'),10000);
+        // Kraken orderbook
+        var kMap2={'BTC_USDC':'XBTUSDT','ETH_USDC':'ETHUSDT','SOL_USDC':'SOLUSDT','XRP_USDC':'XRPUSDT','DOGE_USDC':'XDGUSDT','ADA_USDC':'ADAUSDT','AVAX_USDC':'AVAXUSDT','LINK_USDC':'LINKUSDT'};
+        var kSym2=kMap2[sym]||(sym.replace('_',''));
+        var d=await fetchWithTimeout('https://swingai-revolut.tomek-falek.workers.dev/market?path='+encodeURIComponent('/0/public/Depth')+'&qs='+encodeURIComponent('pair='+kSym2+'&count=20'),10000);
         var dj = await d.json();
-        var bidVol = (dj.bids||[]).reduce(function(s,b){ var v=(parseFloat(b[0])||0)*(parseFloat(b[1])||0); return s+(isFinite(v)?v:0); }, 0);
-        var askVol = (dj.asks||[]).reduce(function(s,a){ var v=(parseFloat(a[0])||0)*(parseFloat(a[1])||0); return s+(isFinite(v)?v:0); }, 0);
+        var key2=Object.keys(dj.result||{})[0];var book=key2?dj.result[key2]:{bids:[],asks:[]};
+        var bidVol = (book.bids||[]).reduce(function(s,b){ var v=(parseFloat(b[0])||0)*(parseFloat(b[1])||0); return s+(isFinite(v)?v:0); }, 0);
+        var askVol = (book.asks||[]).reduce(function(s,a){ var v=(parseFloat(a[0])||0)*(parseFloat(a[1])||0); return s+(isFinite(v)?v:0); }, 0);
         var total  = bidVol + askVol;
         var ratio  = total > 0 ? bidVol / total : 0.5;
-        var spread = dj.asks[0] && dj.bids[0]
-          ? (parseFloat(dj.asks[0][0]) - parseFloat(dj.bids[0][0])) / parseFloat(dj.bids[0][0]) * 100
+        var spread = book.asks[0] && book.bids[0]
+          ? (parseFloat(book.asks[0][0]) - parseFloat(book.bids[0][0])) / parseFloat(book.bids[0][0]) * 100
           : 0;
         result = { ratio:+ratio.toFixed(3), bidVol:bidVol, askVol:askVol, spread:+spread.toFixed(4), ts:now };
       }
