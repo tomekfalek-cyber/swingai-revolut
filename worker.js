@@ -1,18 +1,18 @@
 // SwingAI Bot 24/7 — Cloudflare Worker — REVOLUT X VERSION
 // Multi-TF (Daily+4H+1H), NB+GBM+QL, PATTERNS, Kelly, ATR-TP/SL, CORR, OBI
-// Market data: Bybit v5 public API USDC spot (Gate.io HTTP403, Binance HTTP451 na CF Workers) | Execution: Revolut X (Ed25519)
+// Market data: Kraken public API (Gate.io/Binance/Bybit blokuja CF Workers) | Execution: Revolut X (Ed25519)
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // KONFIGURACJA
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Bybit spot ma tylko pary USDT — USDC pary nie istnieja (HTTP 403)
-// Dane: BTCUSDT (Bybit) | Handel: BTC/USDC (Revolut X) — mapowanie w revxInstrument()
-const PAIRS = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','AVAXUSDT','LINKUSDT'];
+// Kraken public API — nie blokuje CF Workers
+// Pary Kraken: XBTUSDT, ETHUSDT itd. | Handel Revolut X: BTC/USDC — mapowanie w revxInstrument()
+const PAIRS = ['XBTUSDT','ETHUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','AVAXUSDT','LINKUSDT'];
 const FEE   = 0.002;
 const TIMEOUT_MS = 7 * 24 * 3600000; // 7 dni
 
 const CORR_GROUPS = [
-  ['BTCUSDT'],
+  ['XBTUSDT'],
   ['ETHUSDT'],
   ['SOLUSDT','AVAXUSDT'],
   ['XRPUSDT','ADAUSDT'],
@@ -21,7 +21,7 @@ const CORR_GROUPS = [
 ];
 
 const PAIR_PARAMS_DEFAULT = {
-  'BTCUSDT':  { tp:0.10, sl:0.04, minScore:62 },
+  'XBTUSDT':  { tp:0.10, sl:0.04, minScore:62 },
   'ETHUSDT':  { tp:0.12, sl:0.05, minScore:60 },
   'SOLUSDT':  { tp:0.14, sl:0.06, minScore:58 },
   'XRPUSDT':  { tp:0.15, sl:0.06, minScore:58 },
@@ -243,20 +243,20 @@ export default {
     }
 
 
-    // Proxy Bybit v5 — publiczny endpoint dla dashboard (Gate.io HTTP403, Binance HTTP451 na CF Workers)
+    // Proxy Kraken — publiczny endpoint dla dashboard
     if (url.pathname === '/market') {
       const path = url.searchParams.get('path') || '';
       const qs   = url.searchParams.get('qs')   || '';
       if (path.includes('..') || qs.includes('..')) {
         return new Response('Forbidden', { status: 403, headers: corsHeaders() });
       }
-      const allowed = ['/v5/market/kline', '/v5/market/tickers', '/v5/market/orderbook'];
+      const allowed = ['/0/public/OHLC', '/0/public/Ticker', '/0/public/Depth'];
       if (!allowed.includes(path.split('?')[0])) {
         return new Response('Forbidden', { status: 403, headers: corsHeaders() });
       }
       try {
-        const bybUrl = 'https://api.bybit.com' + path + (qs ? '?' + qs : '');
-        const r = await fetch(bybUrl, { headers: { 'User-Agent': 'SwingAI/1.0' } });
+        const krakenUrl = 'https://api.kraken.com' + path + (qs ? '?' + qs : '');
+        const r = await fetch(krakenUrl, { headers: { 'User-Agent': 'SwingAI/1.0' } });
         const body = await r.text();
         return new Response(body, { status: r.status, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
       } catch(e) {
@@ -774,7 +774,7 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
   if (isVolumeAnomaly(sig)) { addLog(state, 'Vol anomaly: ' + sig.sym + ' vol=' + sig.volR.toFixed(2) + 'x — pomijam', 'warn'); return; }
   if (isDeadHour()) { addLog(state, 'Dead hour (01-05 UTC): ' + sig.sym + ' — pomijam', 'warn'); return; }
 
-  if (btcDrop && sig.sym !== 'BTCUSDT') {
+  if (btcDrop && sig.sym !== 'XBTUSDT') {
     addLog(state, 'BTC Guard: pomijam ' + sig.sym, 'warn'); return;
   }
 
@@ -973,11 +973,16 @@ function isDeadHour() {
 
 async function btcDropGuard() {
   try {
-    const r = await fetchWithTimeout('https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDC');
+    const r = await fetchWithTimeout('https://api.kraken.com/0/public/Ticker?pair=XBTUSDT');
     const d = await r.json();
-    const item = d.result && d.result.list && d.result.list[0];
-    if (!item) return false;
-    return parseFloat(item.price24hPcnt || '0') * 100 < -5;
+    if (d.error && d.error.length > 0) return false;
+    const key = Object.keys(d.result || {})[0];
+    if (!key) return false;
+    const t = d.result[key];
+    const open24h = +t.o;
+    const last    = +t.c[0];
+    if (!open24h) return false;
+    return (last - open24h) / open24h * 100 < -5;
   } catch(e) { return false; }
 }
 
@@ -1427,39 +1432,43 @@ function fetchWithTimeout(url, ms, opts) {
 }
 
 async function getKlines(sym, interval, limit) {
-  // Bybit v5 public API — brak auth, CF Workers nie blokowane, wspiera USDC spot
-  const ivMap = { 'D':'D', '240':'240', '60':'60', '30':'30', '15':'15' };
-  const iv = ivMap[interval] || 'D';
+  // Kraken public API — nie blokuje CF Workers
+  const ivMap = { 'D':'1440', '240':'240', '60':'60', '30':'30', '15':'15' };
+  const iv = ivMap[interval] || '1440';
   const r = await fetchWithTimeout(
-    `https://api.bybit.com/v5/market/kline?category=spot&symbol=${sym}&interval=${iv}&limit=${limit}`
+    `https://api.kraken.com/0/public/OHLC?pair=${sym}&interval=${iv}&count=${limit}`
   );
   if (!r.ok) throw new Error('getKlines HTTP ' + r.status + ' ' + sym);
   const d = await r.json();
-  if (d.retCode !== 0) throw new Error('getKlines Bybit err ' + d.retMsg + ' ' + sym);
-  const list = d.result && d.result.list;
-  if (!Array.isArray(list) || list.length === 0)
-    throw new Error('getKlines: brak danych ' + sym);
-  // Bybit: [startTime, open, high, low, close, volume, turnover] — najnowsza pierwsza, odwracamy
-  return list.slice().reverse().map(k => [+k[0], +k[1], +k[2], +k[3], +k[4], +k[5]]);
+  if (d.error && d.error.length > 0) throw new Error('getKlines Kraken: ' + d.error[0] + ' ' + sym);
+  const key = Object.keys(d.result || {}).find(k => k !== 'last');
+  if (!key) throw new Error('getKlines: brak danych ' + sym);
+  const list = d.result[key];
+  if (!Array.isArray(list) || list.length === 0) throw new Error('getKlines: pusta lista ' + sym);
+  // Kraken: [time, open, high, low, close, vwap, volume, count]
+  return list.map(k => [+k[0]*1000, +k[1], +k[2], +k[3], +k[4], +k[6]]);
 }
 
 async function getLastPrice(sym) {
-  const r = await fetchWithTimeout(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${sym}`);
+  const r = await fetchWithTimeout(`https://api.kraken.com/0/public/Ticker?pair=${sym}`);
   if (!r.ok) throw new Error('getPrice HTTP ' + r.status);
   const d = await r.json();
-  const item = d.result && d.result.list && d.result.list[0];
-  if (!item || !item.lastPrice) throw new Error('getPrice: brak danych ' + sym);
-  return +item.lastPrice;
+  if (d.error && d.error.length > 0) throw new Error('getPrice Kraken: ' + d.error[0]);
+  const key = Object.keys(d.result || {})[0];
+  if (!key) throw new Error('getPrice: brak danych ' + sym);
+  return +d.result[key].c[0];
 }
 
 async function getOrderbook(sym) {
   try {
-    const r = await fetchWithTimeout(`https://api.bybit.com/v5/market/orderbook?category=spot&symbol=${sym}&limit=20`);
+    const r = await fetchWithTimeout(`https://api.kraken.com/0/public/Depth?pair=${sym}&count=20`);
     if (!r.ok) return { ratio: 0.5 };
     const d = await r.json();
-    if (!d.result || !d.result.b || !d.result.a) return { ratio: 0.5 };
-    const bids = d.result.b.reduce((s, x) => s + +x[1], 0);
-    const asks = d.result.a.reduce((s, x) => s + +x[1], 0);
+    if (d.error && d.error.length > 0) return { ratio: 0.5 };
+    const key = Object.keys(d.result || {})[0];
+    if (!key) return { ratio: 0.5 };
+    const bids = d.result[key].bids.reduce((s, x) => s + +x[1], 0);
+    const asks = d.result[key].asks.reduce((s, x) => s + +x[1], 0);
     const total = bids + asks;
     return { ratio: total > 0 ? bids / total : 0.5, bids, asks };
   } catch(e) { return { ratio: 0.5 }; }
@@ -1493,9 +1502,9 @@ async function getFearGreed(state) {
 // REVOLUT X TRADING — Ed25519 signing
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// Mapuj BTCUSDT (Bybit dane) → BTC/USDC (format Revolut X handel)
+// Mapuj XBTUSDT (Kraken) → BTC/USDC (format Revolut X handel)
 function revxInstrument(sym) {
-  return sym.replace('USDT', '/USDC');
+  return sym.replace('XBT','BTC').replace('USDT','/USDC');
 }
 
 // Wczytaj Ed25519 PKCS8 PEM klucz prywatny
