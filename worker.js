@@ -1,32 +1,32 @@
 // SwingAI Bot 24/7 — Cloudflare Worker — REVOLUT X VERSION
 // Multi-TF (Daily+4H+1H), NB+GBM+QL, PATTERNS, Kelly, ATR-TP/SL, CORR, OBI
-// Market data: Gate.io (public) | Execution: Revolut X (Ed25519)
+// Market data: Bybit v5 public API USDC spot (Gate.io HTTP403, Binance HTTP451 na CF Workers) | Execution: Revolut X (Ed25519)
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // KONFIGURACJA
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const PAIRS = ['BTC_USDC','ETH_USDC','SOL_USDC','XRP_USDC','DOGE_USDC','ADA_USDC','AVAX_USDC','LINK_USDC'];
+const PAIRS = ['BTCUSDC','ETHUSDC','SOLUSDC','XRPUSDC','DOGEUSDC','ADAUSDC','AVAXUSDC','LINKUSDC'];
 const FEE   = 0.002;
 const TIMEOUT_MS = 7 * 24 * 3600000; // 7 dni
 
 const CORR_GROUPS = [
-  ['BTC_USDC'],
-  ['ETH_USDC'],
-  ['SOL_USDC','AVAX_USDC'],
-  ['XRP_USDC','ADA_USDC'],
-  ['DOGE_USDC'],
-  ['LINK_USDC']
+  ['BTCUSDC'],
+  ['ETHUSDC'],
+  ['SOLUSDC','AVAXUSDC'],
+  ['XRPUSDC','ADAUSDC'],
+  ['DOGEUSDC'],
+  ['LINKUSDC']
 ];
 
 const PAIR_PARAMS_DEFAULT = {
-  'BTC_USDC':  { tp:0.10, sl:0.04, minScore:62 },
-  'ETH_USDC':  { tp:0.12, sl:0.05, minScore:60 },
-  'SOL_USDC':  { tp:0.14, sl:0.06, minScore:58 },
-  'XRP_USDC':  { tp:0.15, sl:0.06, minScore:58 },
-  'DOGE_USDC': { tp:0.18, sl:0.07, minScore:60 },
-  'ADA_USDC':  { tp:0.14, sl:0.06, minScore:58 },
-  'AVAX_USDC': { tp:0.14, sl:0.06, minScore:58 },
-  'LINK_USDC': { tp:0.14, sl:0.06, minScore:58 }
+  'BTCUSDC':  { tp:0.10, sl:0.04, minScore:62 },
+  'ETHUSDC':  { tp:0.12, sl:0.05, minScore:60 },
+  'SOLUSDC':  { tp:0.14, sl:0.06, minScore:58 },
+  'XRPUSDC':  { tp:0.15, sl:0.06, minScore:58 },
+  'DOGEUSDC': { tp:0.18, sl:0.07, minScore:60 },
+  'ADAUSDC':  { tp:0.14, sl:0.06, minScore:58 },
+  'AVAXUSDC': { tp:0.14, sl:0.06, minScore:58 },
+  'LINKUSDC': { tp:0.14, sl:0.06, minScore:58 }
 };
 
 // Revolut X base URL
@@ -241,22 +241,20 @@ export default {
     }
 
 
-    // Proxy Gate.io — publiczny endpoint dla dashboard (omija Zscaler)
+    // Proxy Bybit v5 — publiczny endpoint dla dashboard (Gate.io HTTP403, Binance HTTP451 na CF Workers)
     if (url.pathname === '/market') {
       const path = url.searchParams.get('path') || '';
       const qs   = url.searchParams.get('qs')   || '';
-      // FIX 9: zablokuj path traversal przed sprawdzeniem allowlist
       if (path.includes('..') || qs.includes('..')) {
         return new Response('Forbidden', { status: 403, headers: corsHeaders() });
       }
-      const allowed = ['/api/v4/spot/candlesticks', '/api/v4/spot/tickers', '/api/v4/spot/order_book'];
-      // FIX 9: dokładne porównanie ścieżki (bez parametrów) zamiast startsWith
+      const allowed = ['/v5/market/kline', '/v5/market/tickers', '/v5/market/orderbook'];
       if (!allowed.includes(path.split('?')[0])) {
         return new Response('Forbidden', { status: 403, headers: corsHeaders() });
       }
       try {
-        const gateUrl = 'https://api.gateio.ws' + path + (qs ? '?' + qs : '');
-        const r = await fetch(gateUrl, { headers: { 'User-Agent': 'SwingAI/1.0' } });
+        const bybUrl = 'https://api.bybit.com' + path + (qs ? '?' + qs : '');
+        const r = await fetch(bybUrl, { headers: { 'User-Agent': 'SwingAI/1.0' } });
         const body = await r.text();
         return new Response(body, { status: r.status, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
       } catch(e) {
@@ -774,7 +772,7 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
   if (isVolumeAnomaly(sig)) { addLog(state, 'Vol anomaly: ' + sig.sym + ' vol=' + sig.volR.toFixed(2) + 'x — pomijam', 'warn'); return; }
   if (isDeadHour()) { addLog(state, 'Dead hour (01-05 UTC): ' + sig.sym + ' — pomijam', 'warn'); return; }
 
-  if (btcDrop && sig.sym !== 'BTC_USDC') {
+  if (btcDrop && sig.sym !== 'BTCUSDC') {
     addLog(state, 'BTC Guard: pomijam ' + sig.sym, 'warn'); return;
   }
 
@@ -859,7 +857,7 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
     }
   }
 
-  const _pairName = adjSig.sym.replace('_USDC', '');
+  const _pairName = adjSig.sym.replace('USDT', '').replace('USDC', '');
   const _modeLabel = cfg.mode === 'live' ? 'LIVE (Revolut X)' : 'PAPER (symulacja)';
   await tgSend(cfg,
     'SYGNAL KUPNA — ' + _pairName + '\n\n' +
@@ -932,7 +930,7 @@ async function closePosition(pos, price, reason, cfg, state, ql) {
   state.stats = calcStats(state.trades);
 
   const _closeIcon = pnl >= 0 ? '[+]' : '[-]';
-  const _closeSym = pos.sym.replace('_USDC','');
+  const _closeSym = pos.sym.replace('USDT','').replace('USDC','');
   addLog(state,
     _closeIcon + ' ' + pos.sym + ' ' + reason +
     ' P/L: ' + (pnl>=0?'+':'') + '$' + pnl.toFixed(2) +
@@ -973,10 +971,11 @@ function isDeadHour() {
 
 async function btcDropGuard() {
   try {
-    const r = await fetchWithTimeout('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDC');
+    const r = await fetchWithTimeout('https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDC');
     const d = await r.json();
-    if (!Array.isArray(d) || !d[0]) return false;
-    return parseFloat(d[0].change_percentage || '0') < -5;
+    const item = d.result && d.result.list && d.result.list[0];
+    if (!item) return false;
+    return parseFloat(item.price24hPcnt || '0') * 100 < -5;
   } catch(e) { return false; }
 }
 
@@ -1426,38 +1425,39 @@ function fetchWithTimeout(url, ms, opts) {
 }
 
 async function getKlines(sym, interval, limit) {
-  // Gate.io: mapowanie interwałów
-  const ivMap = { 'D':'1d', '240':'4h', '60':'1h', '30':'30m', '15':'15m' };
-  const iv = ivMap[interval] || '1d';
+  // Bybit v5 public API — brak auth, CF Workers nie blokowane, wspiera USDC spot
+  const ivMap = { 'D':'D', '240':'240', '60':'60', '30':'30', '15':'15' };
+  const iv = ivMap[interval] || 'D';
   const r = await fetchWithTimeout(
-    `https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${sym}&interval=${iv}&limit=${limit}`
+    `https://api.bybit.com/v5/market/kline?category=spot&symbol=${sym}&interval=${iv}&limit=${limit}`
   );
   if (!r.ok) throw new Error('getKlines HTTP ' + r.status + ' ' + sym);
   const d = await r.json();
-  if (!Array.isArray(d) || d.length === 0)
+  if (d.retCode !== 0) throw new Error('getKlines Bybit err ' + d.retMsg + ' ' + sym);
+  const list = d.result && d.result.list;
+  if (!Array.isArray(list) || list.length === 0)
     throw new Error('getKlines: brak danych ' + sym);
-  // Gate.io format: [timestamp_secs, volume, close, high, low, open, ...]
-  // Mapujemy na: [timestamp_ms, open, high, low, close, volume]
-  // x[0]=ts_s, x[1]=volume, x[2]=close, x[3]=high, x[4]=low, x[5]=open
-  return d.map(x => [+x[0]*1000, +x[5], +x[3], +x[4], +x[2], +x[1]]);
+  // Bybit: [startTime, open, high, low, close, volume, turnover] — najnowsza pierwsza, odwracamy
+  return list.slice().reverse().map(k => [+k[0], +k[1], +k[2], +k[3], +k[4], +k[5]]);
 }
 
 async function getLastPrice(sym) {
-  const r = await fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/tickers?currency_pair=${sym}`);
+  const r = await fetchWithTimeout(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${sym}`);
   if (!r.ok) throw new Error('getPrice HTTP ' + r.status);
   const d = await r.json();
-  if (!Array.isArray(d) || !d[0]) throw new Error('getPrice: brak danych ' + sym);
-  return +d[0].last;
+  const item = d.result && d.result.list && d.result.list[0];
+  if (!item || !item.lastPrice) throw new Error('getPrice: brak danych ' + sym);
+  return +item.lastPrice;
 }
 
 async function getOrderbook(sym) {
   try {
-    const r = await fetchWithTimeout(`https://api.gateio.ws/api/v4/spot/order_book?currency_pair=${sym}&limit=20`);
+    const r = await fetchWithTimeout(`https://api.bybit.com/v5/market/orderbook?category=spot&symbol=${sym}&limit=20`);
     if (!r.ok) return { ratio: 0.5 };
     const d = await r.json();
-    if (!d.bids || !d.asks) return { ratio: 0.5 };
-    const bids = d.bids.reduce((s, x) => s + +x[1], 0);
-    const asks = d.asks.reduce((s, x) => s + +x[1], 0);
+    if (!d.result || !d.result.b || !d.result.a) return { ratio: 0.5 };
+    const bids = d.result.b.reduce((s, x) => s + +x[1], 0);
+    const asks = d.result.a.reduce((s, x) => s + +x[1], 0);
     const total = bids + asks;
     return { ratio: total > 0 ? bids / total : 0.5, bids, asks };
   } catch(e) { return { ratio: 0.5 }; }
@@ -1491,9 +1491,9 @@ async function getFearGreed(state) {
 // REVOLUT X TRADING — Ed25519 signing
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// Mapuj BTC_USDC → BTC/USDC (format Revolut X)
+// Mapuj BTCUSDC → BTC/USDC (format Revolut X)
 function revxInstrument(sym) {
-  return sym.replace('_', '/');
+  return sym.replace('USDC', '/USDC').replace('USDT', '/USDT');
 }
 
 // Wczytaj Ed25519 PKCS8 PEM klucz prywatny
@@ -1696,4 +1696,5 @@ function redirectHTML(msg) {
 <style>body{background:#020810;color:#00e5a0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:1.4em;flex-direction:column;gap:12px;}</style>
 </head><body><div>${msg}</div><div style="color:#334d74;font-size:0.5em">Przekierowanie za 2 sekundy...</div></body></html>`;
 }
+
 
