@@ -859,7 +859,7 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
     }
   }
 
-  const _pairName = adjSig.sym.replace('USDT', '').replace('USDC', '');
+  const _pairName = adjSig.sym.replace('XBT','BTC').replace('USDT','').replace('USDC','');
   const _modeLabel = cfg.mode === 'live' ? 'LIVE (Revolut X)' : 'PAPER (symulacja)';
   await tgSend(cfg,
     'SYGNAL KUPNA — ' + _pairName + '\n\n' +
@@ -932,7 +932,7 @@ async function closePosition(pos, price, reason, cfg, state, ql) {
   state.stats = calcStats(state.trades);
 
   const _closeIcon = pnl >= 0 ? '[+]' : '[-]';
-  const _closeSym = pos.sym.replace('USDT','').replace('USDC','');
+  const _closeSym = pos.sym.replace('XBT','BTC').replace('USDT','').replace('USDC','');
   addLog(state,
     _closeIcon + ' ' + pos.sym + ' ' + reason +
     ' P/L: ' + (pnl>=0?'+':'') + '$' + pnl.toFixed(2) +
