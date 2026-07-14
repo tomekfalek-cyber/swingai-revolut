@@ -196,7 +196,7 @@ export default {
       try { const body = await request.json(); msg = body.text || ''; } catch(e) { msg = url.searchParams.get('text') || ''; }
       if (!msg) return jsonResp({ ok: false, error: 'Brak treści wiadomości' });
       try {
-        const tgR = await fetch('https://api.telegram.org/bot' + cfg.tgToken + '/sendMessage', {
+        const tgR = await fetchWithTimeout('https://api.telegram.org/bot' + cfg.tgToken + '/sendMessage', 8000, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ chat_id: cfg.tgChat, text: msg, parse_mode: 'HTML' })
         });
@@ -211,7 +211,7 @@ export default {
       const tgUrl = 'https://api.telegram.org/bot' + cfg.tgToken + '/sendMessage';
       let tgResult;
       try {
-        const r = await fetch(tgUrl, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        const r = await fetchWithTimeout(tgUrl, 8000, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
         tgResult = await r.json();
       } catch(e) { tgResult = { fetchError: e.message }; }
       return jsonResp({ tokenPrefix: (cfg.tgToken||'').slice(0,12)+'...', chat_id: cfg.tgChat, tgResult });
@@ -223,8 +223,7 @@ export default {
         return jsonResp({ ok: false, error: 'Brak tokenu Telegram w konfiguracji' });
       }
       try {
-        const tgResp = await fetch(
-          'https://api.telegram.org/bot' + cfg.tgToken + '/sendMessage',
+        const tgResp = await fetchWithTimeout('https://api.telegram.org/bot' + cfg.tgToken + '/sendMessage', 8000,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -256,7 +255,7 @@ export default {
       }
       try {
         const krakenUrl = 'https://api.kraken.com' + path + (qs ? '?' + qs : '');
-        const r = await fetch(krakenUrl, { headers: { 'User-Agent': 'SwingAI/1.0' } });
+        const r = await fetchWithTimeout(krakenUrl, 8000, { headers: { 'User-Agent': 'SwingAI/1.0' } });
         const body = await r.text();
         return new Response(body, { status: r.status, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
       } catch(e) {
@@ -1630,7 +1629,7 @@ async function revxMarketSell(sym, baseQty, cfg) {
 async function tgSend(cfg, msg) {
   if (!cfg.tgToken || !cfg.tgChat) return;
   try {
-    await fetch(`https://api.telegram.org/bot${cfg.tgToken}/sendMessage`, {
+    await fetchWithTimeout(`https://api.telegram.org/bot${cfg.tgToken}/sendMessage`, 8000, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: cfg.tgChat, text: msg, parse_mode: 'HTML' })
