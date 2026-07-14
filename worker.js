@@ -709,8 +709,8 @@ async function checkPositions(cfg, state, env, ql) {
       let reason = null;
 
       if (Date.now() - pos.entryTs > TIMEOUT_MS)             reason = 'TIMEOUT 7d';
-      else if (pnlPct >= cfg.tp * 100)                       reason = 'TAKE PROFIT';
-      else if (pos.partialClosed ? price <= pos.sl : pnlPct <= -cfg.sl * 100) reason = 'STOP LOSS';
+      else if (price >= (pos.tp > 0 ? pos.tp : pos.entry * (1 + cfg.tp))) reason = 'TAKE PROFIT';
+      else if (price <= (pos.partialClosed ? pos.sl : (pos.sl > 0 ? pos.sl : pos.entry * (1 - cfg.sl)))) reason = 'STOP LOSS';
       else if (price <= trail && pnlPct > 1.5)               reason = 'TRAILING STOP';
 
       // Partial TP (50% pozycji przy połowie TP)
