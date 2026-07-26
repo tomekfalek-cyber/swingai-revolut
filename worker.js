@@ -276,14 +276,21 @@ async function runBotCycle(env) {
   if (!cfg.active) return;
   const state = await getState(env);
 
-  // Mutex — zapobiega równoległemu uruchomieniu dwóch cykli
+  // Mutex — zapobiega równoległemu uruchomieniu dwóch cykli.
+  // UWAGA: TTL musi być bezpiecznie dłuższy niż realistyczny NAJGORSZY (ale wciąż
+  // normalny, nie zawieszony) czas 1 cyklu. Przy 8 parach x kilka interwałów klines
+  // x timeout + sleep(700ms) między parami + podpisywanie Ed25519 dla Revolut X,
+  // cykl w wolnych warunkach sieciowych może zająć kilka minut. Zbyt krótki TTL
+  // (poprzednio 120s) mógł zwalniać blokadę zanim poprzedni cykl faktycznie się
+  // skończył, pozwalając na nakładanie się cykli — dokładnie problem, któremu ta
+  // blokada ma zapobiegać.
   const lockKey = 'bot_running_lock';
   const lockVal = await env.SWINGAI_REVOLUT_KV.get(lockKey);
   if (lockVal) {
     console.log('Bot already running, skipping cycle');
     return;
   }
-  await env.SWINGAI_REVOLUT_KV.put(lockKey, '1', { expirationTtl: 120 }); // TTL 2 min auto-release
+  await env.SWINGAI_REVOLUT_KV.put(lockKey, '1', { expirationTtl: 480 }); // TTL 8 min auto-release
   try {
 
   state.iter  = (state.iter || 0) + 1;
