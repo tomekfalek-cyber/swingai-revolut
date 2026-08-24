@@ -2818,6 +2818,27 @@ function saveSettings() {
   CFG.minScore=rawScore;CFG.riskPct=rawRisk;CFG.fgMin=isFinite(rawFG)?rawFG:20;
   CFG.tgToken=gi('cfg-tg-token').value.trim();CFG.tgChat=gi('cfg-tg-chat').value.trim();
   saveCfg();
+  // Sync do Workera - ta sama poprawka co dzisiaj w swingai-bot/MEXC. Bez tego
+  // przelacznik trybu (i reszta ustawien) w ogole nie docieral do serwera, wiec
+  // KV zostawal na starych wartosciach niezaleznie od tego co wybrano w UI.
+  try {
+    if (CFG.workerUrl) {
+      const _params = new URLSearchParams();
+      _params.set('auth', CFG.authToken || 'swingai-revolut-2024');
+      if (CFG.mode === 'paper' || CFG.mode === 'live') _params.set('mode', CFG.mode);
+      if (CFG.revxApiKey)  _params.set('key',  CFG.revxApiKey);
+      if (CFG.revxPrivKey) _params.set('priv', CFG.revxPrivKey);
+      if (CFG.tgToken) _params.set('tg', CFG.tgToken);
+      if (CFG.tgChat)  _params.set('tgc', CFG.tgChat);
+      _params.set('tp', (CFG.tp*100).toString());
+      _params.set('sl', (CFG.sl*100).toString());
+      _params.set('trail', (CFG.trail*100).toString());
+      _params.set('score', CFG.minScore.toString());
+      _params.set('maxp', CFG.maxPos.toString());
+      _params.set('size', CFG.posSize.toString());
+      fetch(CFG.workerUrl + '/save-config?' + _params.toString()).catch(function(){});
+    }
+  } catch(e) { console.warn('sync do workera nieudany:', e); }
   gi('cfg-status').textContent='Zapisano';gi('cfg-status').style.color='var(--green)';
   gi('lim-maxpos').textContent=CFG.maxPos;gi('lim-tp').textContent=(CFG.tp*100)+'%';
   gi('lim-sl').textContent=(CFG.sl*100)+'%';gi('lim-trail').textContent=(CFG.trail*100)+'%';

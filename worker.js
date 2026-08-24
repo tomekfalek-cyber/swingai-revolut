@@ -139,6 +139,9 @@ export default {
     if (url.pathname === '/save-config') {
       const p = url.searchParams;
       const cfg = await getConfig(env);
+      // Bez tego przelacznik trybu w ustawieniach na dashboardzie nic nie robil -
+      // ta sama luka co byla w swingai-bot/MEXC przed dzisiejsza poprawka.
+      if (p.get('mode') === 'paper' || p.get('mode') === 'live') cfg.mode = p.get('mode');
       if (p.get('key'))   cfg.revxApiKey  = p.get('key');
       if (p.get('priv'))  cfg.revxPrivKey = p.get('priv');
       if (p.get('tg'))    cfg.tgToken     = p.get('tg');
@@ -1413,7 +1416,9 @@ function bband(c, p=20) {
   if (!c||!c.length) return {upper:0,mid:0,lower:0,pos:0.5};
   if (c.length<p) {const v=c.at(-1)||0;return{upper:v*1.02,mid:v,lower:v*0.98,pos:0.5};}
   const sl=c.slice(-p), m=sl.reduce((a,b)=>a+b,0)/p;
-  const std=Math.sqrt(sl.reduce((a,b)=>a+(b-m)**2,0)/(p-1));
+  // Standardowa definicja Bollinger Bands uzywa odchylenia POPULACYJNEGO (dzielenie
+  // przez p), nie probkowego (p-1). Ta sama poprawka co w swingai-bot/MEXC.
+  const std=Math.sqrt(sl.reduce((a,b)=>a+(b-m)**2,0)/p);
   const up=m+2*std, lo=m-2*std;
   const pos=up===lo?0.5:Math.max(0,Math.min(1,(c.at(-1)-lo)/(up-lo)));
   return {upper:up,mid:m,lower:lo,pos,range:up-lo};
@@ -1423,7 +1428,12 @@ function atr(h, l, c, p=14) {
   if (h.length<p+1) return 0;
   const trs=[];
   for (let i=1;i<h.length;i++) trs.push(Math.max(h[i]-l[i],Math.abs(h[i]-c[i-1]),Math.abs(l[i]-c[i-1])));
-  return trs.slice(-p).reduce((a,b)=>a+b,0)/p;
+  if (trs.length<p) return trs.reduce((a,b)=>a+b,0)/(trs.length||1);
+  // Kanoniczne wygladzanie Wildera zamiast prostej sredniej kroczacej - ta sama
+  // poprawka co w swingai-bot/MEXC (wplywa na obliczane TP/SL/trailing).
+  let a = trs.slice(0,p).reduce((x,y)=>x+y,0)/p;
+  for (let i=p;i<trs.length;i++) a = (a*(p-1)+trs[i])/p;
+  return a;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
