@@ -1,15 +1,27 @@
 // SwingAI Bot 24/7 — Cloudflare Worker — REVOLUT X VERSION
-// Multi-TF (Daily+4H+1H), NB+GBM+QL, PATTERNS, Kelly, ATR-TP/SL, CORR, OBI
-// Market data: Kraken public API (Gate.io/Binance/Bybit blokuja CF Workers) | Execution: Revolut X (Ed25519)
+// Multi-TF DAY TRADING (1H+15min+5min), NB+GBM+QL, SMC, PATTERNS, Kelly, ATR-TP/SL, CORR, OBI
+// Market data: Revolut X public API (revx.revolut.com/api/1.0/public/*) | Execution: Revolut X (Ed25519)
+// Dane i egzekucja z JEDNEJ gieldy (Revolut X) - zero rozjazdu miedzy cena analizy
+// a cena wykonania, i zero kolizji limitu zapytan z botem MEXC/swing (ktory uzywa
+// Krakena) dzialajacym na tym samym koncie Cloudflare.
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // KONFIGURACJA
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Kraken public API — nie blokuje CF Workers
 // Pary Kraken: XBTUSDT, ETHUSDT itd. | Handel Revolut X: BTC/USDC — mapowanie w revxInstrument()
-const PAIRS = ['XBTUSDT','ETHUSDT','SOLUSDT','XRPUSDT','DOGEUSDT','ADAUSDT','AVAXUSDT','LINKUSDT'];
+// Day trading: mniej par niz w wersji swingowej, bo skan jest 3x czestszy (co 3
+// min zamiast 10) - trzyma budzet zapytan/dzien i limit KV w bezpiecznych granicach
+// mimo wiekszej czestotliwosci. Najbardziej plynne pary, najlepsze dla intraday.
+// PEPEUSDT dodany po potwierdzeniu, ze Revolut X notuje PEPE/USDC - traktowany
+// jako "satelitarna" para wysokiego ryzyka: wlasna grupa korelacji (nie koreluje
+// bezposrednio z BTC/ETH/SOL/XRP na tyle, by wymagac blokady), szerszy tp/sl i
+// wyzszy minScore w PAIR_PARAMS_DEFAULT (nizej), a filtr pump/dump jest juz
+// ATR-relative (patrz isPumpDump) - automatycznie dopasowuje sie do jego
+// naturalnie wyzszej zmiennosci bez recznego przeliczania.
+const PAIRS = ['XBTUSDT','ETHUSDT','SOLUSDT','XRPUSDT','PEPEUSDT'];
 const FEE   = 0.002;
-const TIMEOUT_MS = 7 * 24 * 3600000; // 7 dni
+const TIMEOUT_MS = 8 * 3600000; // 8h - day trading: pozycja zamykana w ramach jednej sesji, nie tygodniami jak w swingu
 
 const CORR_GROUPS = [
   ['XBTUSDT'],
@@ -17,18 +29,32 @@ const CORR_GROUPS = [
   ['SOLUSDT','AVAXUSDT'],
   ['XRPUSDT','ADAUSDT'],
   ['DOGEUSDT'],
-  ['LINKUSDT']
+  ['LINKUSDT'],
+  ['PEPEUSDT']
 ];
 
+// tp/sl przeskalowane ze starych wartosci swingowych (10-18%/4-7%) na skale
+// day-trading, proporcjonalnie do defaultConfig() (tp:0.02/sl:0.01) - relatywne
+// roznice miedzy parami (BTC najcieszej, DOGE najszerzej) zostaly zachowane.
+// minScore podniesiony +4 wzgledem wersji startowej (58-62 -> 62-66) - przy
+// niskim progu i skanie co 3 min przechodzilo za duzo szumu; wyzszy prog +
+// wymog confluence (analyzeSwing) maja ograniczyc liczbe slabych wejsc bez
+// utraty czestotliwosci potrzebnej do day tradingu.
 const PAIR_PARAMS_DEFAULT = {
-  'XBTUSDT':  { tp:0.10, sl:0.04, minScore:62 },
-  'ETHUSDT':  { tp:0.12, sl:0.05, minScore:60 },
-  'SOLUSDT':  { tp:0.14, sl:0.06, minScore:58 },
-  'XRPUSDT':  { tp:0.15, sl:0.06, minScore:58 },
-  'DOGEUSDT': { tp:0.18, sl:0.07, minScore:60 },
-  'ADAUSDT':  { tp:0.14, sl:0.06, minScore:58 },
-  'AVAXUSDT': { tp:0.14, sl:0.06, minScore:58 },
-  'LINKUSDT': { tp:0.14, sl:0.06, minScore:58 }
+  'XBTUSDT':  { tp:0.017, sl:0.008, minScore:66 },
+  'ETHUSDT':  { tp:0.020, sl:0.010, minScore:64 },
+  'SOLUSDT':  { tp:0.023, sl:0.012, minScore:62 },
+  'XRPUSDT':  { tp:0.025, sl:0.012, minScore:62 },
+  'DOGEUSDT': { tp:0.030, sl:0.014, minScore:64 },
+  'ADAUSDT':  { tp:0.023, sl:0.012, minScore:62 },
+  'AVAXUSDT': { tp:0.023, sl:0.012, minScore:62 },
+  'LINKUSDT': { tp:0.023, sl:0.012, minScore:62 },
+  // Memecoin - naturalna zmiennosc wyzsza niz reszta par, technicznie mniej
+  // przewidywalna (ruchy sterowane sentymentem/social, nie tylko przeplywem
+  // kapitalu jak BTC/ETH) - szerszy tp/sl (floor, bo calcDynamicLevels i tak
+  // bierze max(tp, atrPct*2.5)) i wyzszy minScore (mniejsza pewnosc sygnalow
+  // technicznych dla tego typu instrumentu wymaga mocniejszego potwierdzenia).
+  'PEPEUSDT': { tp:0.035, sl:0.018, minScore:68 }
 };
 
 // Revolut X base URL
@@ -44,17 +70,105 @@ export default {
 
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // Endpointy PIN-gate/sesji wolane przez index.html na github.io - to jest
+    // request CROSS-SITE (inna domena niz workers.dev), wiec cookie sesji musi byc
+    // SameSite=None+Secure i CORS musi zwracac KONKRETNE origin (nie '*') razem z
+    // Allow-Credentials:true - inaczej przegladarka po cichu nie wysle/nie odczyta
+    // cookie i caly PIN-gate nie zadziala pomimo poprawnej logiki po stronie serwera.
+    const PIN_PATHS = ['/verify-pin', '/change-pin', '/session-check', '/clear-stats'];
     if (request.method === 'OPTIONS')
-      return new Response(null, { status: 204, headers: corsHeaders() });
+      return new Response(null, { status: 204, headers: PIN_PATHS.includes(url.pathname) ? pinCorsHeaders(request) : corsHeaders() });
 
     // AUTENTYKACJA
     const AUTH_SECRET = env.AUTH_SECRET || 'swingai-revolut-2024';
     const authHeader  = request.headers.get('Authorization') || '';
     const authParam   = url.searchParams.get('auth') || '';
     const isAuth = authHeader === 'Bearer ' + AUTH_SECRET || authParam === AUTH_SECRET;
-    const publicPaths = ['/', '/state-public', '/market'];
+    const publicPaths = ['/', '/state-public', '/market', ...PIN_PATHS];
     if (!isAuth && !publicPaths.includes(url.pathname)) {
       return new Response('Unauthorized', { status: 401, headers: corsHeaders() });
+    }
+
+    // ── PIN GATE ────────────────────────────────────────────────────────
+    // Identyczny mechanizm jak w swingai-bot/MEXC: PIN (hash SHA-256) w KV pod
+    // 'pinHash', sesja w cookie (KV 'sess_<id>'), limit 5 nieudanych prob/15 min
+    // na IP w KV 'pinfail_<ip>'. Roznica: tam Worker sam serwuje HTML dashboardu
+    // (ten sam origin), tutaj index.html jest statycznym plikiem na GitHub Pages
+    // (INNY origin) - stad SameSite=None+Secure i pinCorsHeaders() zamiast Lax+'*'.
+    if (url.pathname === '/verify-pin' && request.method === 'POST') {
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const rl = await checkPinRateLimit(env, ip);
+      if (rl.blocked) return pinJsonResp({ ok:false, error:'Za wiele nieudanych prob. Sprobuj za 15 minut.' }, 429, request);
+      let pin = '';
+      try { const body = await request.json(); pin = String(body.pin || ''); } catch(e) {}
+      const storedHash = await env.SWINGAI_REVOLUT_KV.get('pinHash');
+      const inputHash  = await sha256Hex(pin);
+      if (!storedHash || inputHash !== storedHash) {
+        await recordPinFail(env, rl.key);
+        return pinJsonResp({ ok:false, error:'Nieprawidlowy PIN' }, 401, request);
+      }
+      await clearPinFail(env, rl.key);
+      const sid = randomToken(32);
+      await env.SWINGAI_REVOLUT_KV.put('sess_' + sid, '1', { expirationTtl: 30 * 24 * 3600 });
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, pinCorsHeaders(request));
+      headers['Set-Cookie'] = 'swingai_sess=' + sid + '; Path=/; Max-Age=' + (30*24*3600) + '; HttpOnly; Secure; SameSite=None';
+      return new Response(JSON.stringify({ ok:true }), { headers });
+    }
+
+    if (url.pathname === '/session-check') {
+      const ok = await isValidSession(env, request);
+      return pinJsonResp({ ok }, 200, request);
+    }
+
+    if (url.pathname === '/change-pin' && request.method === 'POST') {
+      const sessionOk = await isValidSession(env, request);
+      if (!sessionOk) return pinJsonResp({ ok:false, error:'Sesja wygasla — zaloguj sie ponownie' }, 401, request);
+      const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const rl = await checkPinRateLimit(env, ip);
+      if (rl.blocked) return pinJsonResp({ ok:false, error:'Za wiele nieudanych prob. Sprobuj za 15 minut.' }, 429, request);
+      let oldPin = '', newPin = '';
+      try { const body = await request.json(); oldPin = String(body.oldPin || ''); newPin = String(body.newPin || ''); } catch(e) {}
+      if (!/^\d{8}$/.test(newPin)) return pinJsonResp({ ok:false, error:'Nowy PIN musi miec 8 cyfr' }, 400, request);
+      const storedHash = await env.SWINGAI_REVOLUT_KV.get('pinHash');
+      const oldHash    = await sha256Hex(oldPin);
+      if (!storedHash || oldHash !== storedHash) {
+        await recordPinFail(env, rl.key);
+        return pinJsonResp({ ok:false, error:'Aktualny PIN nieprawidlowy' }, 401, request);
+      }
+      await clearPinFail(env, rl.key);
+      const newHash = await sha256Hex(newPin);
+      await env.SWINGAI_REVOLUT_KV.put('pinHash', newHash);
+      return pinJsonResp({ ok:true }, 200, request);
+    }
+
+    // Manualne czyszczenie statystyk/modeli AI - uzytkownik testowal recznymi
+    // zamknieciami pozycji, co zafalszowalo winrate i wytrenowane modele (NB/GBM/QL
+    // uczyly sie na tych testowych tradach). Reset NIE dotyka aktywnych pozycji ani
+    // config (klucze API, PIN) - tylko historii/statystyk/modeli.
+    if (url.pathname === '/clear-stats' && request.method === 'POST') {
+      const sessionOk = await isValidSession(env, request);
+      if (!sessionOk) return pinJsonResp({ ok:false, error:'Sesja wygasla — zaloguj sie ponownie' }, 401, request);
+      const cfg = await getConfig(env);
+      const state = await getState(env);
+      state.trades = [];
+      state.stats = null;
+      state.nb = null;
+      state.gbm = null;
+      state.ql = null;
+      state.ensembleW = null;
+      state.pairParams = {};
+      state.adaptiveMinScore = cfg.minScore;
+      state.dailyPnl = 0;
+      state.dailyStartBalance = 0;
+      state.peakBalance = 0;
+      state.drawdownBlock = 0;
+      state.consLoss = 0;
+      state.cooldown = {};
+      state.globalBlockUntil = 0;
+      state.lastGbmRefit = 0;
+      addLog(state, 'Statystyki i modele AI wyczyszczone recznie (pozycje i config bez zmian)', 'warn');
+      await env.SWINGAI_REVOLUT_KV.put('state', JSON.stringify(state));
+      return pinJsonResp({ ok:true }, 200, request);
     }
 
     // Dashboard
@@ -93,10 +207,15 @@ export default {
     }
 
     if (url.pathname === '/start-paper') {
+      const oldCfg = await getConfig(env);
       const cfg = defaultConfig();
       cfg.active = true; cfg.mode = 'paper'; cfg.startedAt = Date.now();
       await env.SWINGAI_REVOLUT_KV.put('config', JSON.stringify(cfg));
-      await env.SWINGAI_REVOLUT_KV.put('state',  JSON.stringify(defaultState()));
+      // Restart w tym samym trybie (np. po zatrzymaniu przez Cloudflare) ma wznowic
+      // dzialanie z otwartymi pozycjami, nie czyscic ich jak przy pierwszym starcie.
+      const oldState = await getState(env);
+      const freshState = (oldCfg.mode === 'paper') ? { ...defaultState(), ...oldState } : defaultState();
+      await env.SWINGAI_REVOLUT_KV.put('state', JSON.stringify(freshState));
       ctx.waitUntil(runBotCycle(env));
       return new Response(redirectHTML('Bot PAPER uruchomiony!'), { headers: {'Content-Type':'text/html;charset=utf-8'} });
     }
@@ -107,12 +226,14 @@ export default {
       cfg.active = true; cfg.mode = 'live'; cfg.startedAt = Date.now();
       cfg.revxApiKey  = p.get('key')   || '';
       cfg.revxPrivKey = p.get('priv')  || '';
-      cfg.tp    = parseFloat(p.get('tp')   || '12') / 100;
-      cfg.sl    = parseFloat(p.get('sl')   || '5')  / 100;
-      cfg.trail = parseFloat(p.get('trail')|| '6')  / 100;
+      cfg.tp    = parseFloat(p.get('tp')   || '2') / 100;
+      cfg.sl    = parseFloat(p.get('sl')   || '1')  / 100;
+      cfg.trail = parseFloat(p.get('trail')|| '0.8')  / 100;
       cfg.minScore = parseInt(p.get('score')|| '58');
       cfg.maxPos   = parseInt(p.get('maxp') || '4');
       cfg.posSize  = parseFloat(p.get('size')|| '15');
+      cfg.riskPct  = parseFloat(p.get('riskPct')|| '2');
+      cfg.fgMin    = parseInt(p.get('fgMin')|| '20');
       cfg.tgToken  = p.get('tg')   || '';
       cfg.tgChat   = p.get('tgc')  || '';
       // Jeśli klucze puste - zachowaj z poprzedniej konfiguracji
@@ -122,15 +243,21 @@ export default {
       if (!cfg.tgToken && oldCfg.tgToken)         cfg.tgToken     = oldCfg.tgToken;
       if (!cfg.tgChat  && oldCfg.tgChat)          cfg.tgChat      = oldCfg.tgChat;
       await env.SWINGAI_REVOLUT_KV.put('config', JSON.stringify(cfg));
-      // Reset stanu ale zachowaj modele AI
+      // Restart w trybie live (np. po zatrzymaniu przez Cloudflare) ma wznowic
+      // dzialanie z otwartymi pozycjami; pelny reset stanu tylko przy realnej
+      // zmianie trybu (paper -> live), bo pozycje z paper tradingu nie odpowiadaja
+      // realnym pozycjom na gieldzie.
       const oldState = await getState(env);
-      const freshState = defaultState();
+      const sameMode = oldCfg.mode === 'live';
+      const freshState = sameMode ? { ...defaultState(), ...oldState } : defaultState();
       freshState.nb  = oldState.nb  || null;
       freshState.gbm = oldState.gbm || null;
       freshState.ql  = oldState.ql  || null;
-      // peakBalanceMode fix: reset peak when switching to live
-      freshState.peakBalance = 0;
-      freshState.peakBalanceMode = 'live';
+      if (!sameMode) {
+        // peakBalanceMode fix: reset peak when switching to live
+        freshState.peakBalance = 0;
+        freshState.peakBalanceMode = 'live';
+      }
       await env.SWINGAI_REVOLUT_KV.put('state', JSON.stringify(freshState));
       ctx.waitUntil(runBotCycle(env));
       return new Response(redirectHTML('Bot LIVE (Revolut X) uruchomiony!'), { headers: {'Content-Type':'text/html;charset=utf-8'} });
@@ -152,6 +279,8 @@ export default {
       if (p.get('score')) cfg.minScore = parseInt(p.get('score'));
       if (p.get('maxp'))  cfg.maxPos   = parseInt(p.get('maxp'));
       if (p.get('size'))  cfg.posSize  = parseFloat(p.get('size'));
+      if (p.get('riskPct')) cfg.riskPct = parseFloat(p.get('riskPct'));
+      if (p.get('fgMin'))    cfg.fgMin   = parseInt(p.get('fgMin'));
       await env.SWINGAI_REVOLUT_KV.put('config', JSON.stringify(cfg));
       return new Response(redirectHTML('Konfiguracja zapisana!'), { headers: {'Content-Type':'text/html;charset=utf-8'} });
     }
@@ -232,7 +361,7 @@ export default {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               chat_id: cfg.tgChat,
-              text: 'Witaj! SwingAI Bot 24/7 — Revolut X aktywny.\n\nPolaczenie dziala.\nPary: BTC ETH SOL XRP DOGE ADA AVAX LINK\nSkany co 1h przez Cloudflare Worker.',
+              text: 'Witaj! SwingAI Bot 24/7 — Revolut X aktywny.\n\nPolaczenie dziala.\nPary: BTC ETH SOL XRP PEPE\nSkany co 3 min przez Cloudflare Worker.',
               parse_mode: 'HTML'
             })
           }
@@ -245,22 +374,62 @@ export default {
     }
 
 
-    // Proxy Kraken — publiczny endpoint dla dashboard
+    // Proxy dla wykresow dashboard — dane z Bybit v5 (Revolut X /public/candles i
+    // /public/order-book wymagaja auth mimo nazwy "public", zweryfikowane 2026-09-02:
+    // HTTP 401 "Unauthenticated access"; dziala bez klucza tylko /public/tickers).
+    // Frontend (index.html) nadal wysyla "stare", Revolut-podobne sciezki/parametry
+    // (np. path=/1.0/public/candles/BTC/USDC) — ZERO zmian w index.html; ten proxy
+    // tlumaczy je na realne zapytania Bybit i przeksztalca odpowiedz z powrotem do
+    // ksztaltu JSON, ktorego juz oczekuje istniejacy kod klienta (getKlines/getTicker/
+    // OBI.fetch w index.html) - stad brak potrzeby dotykania frontendu.
     if (url.pathname === '/market') {
       const path = url.searchParams.get('path') || '';
       const qs   = url.searchParams.get('qs')   || '';
       if (path.includes('..') || qs.includes('..')) {
         return new Response('Forbidden', { status: 403, headers: corsHeaders() });
       }
-      const allowed = ['/0/public/OHLC', '/0/public/Ticker', '/0/public/Depth'];
-      if (!allowed.includes(path.split('?')[0])) {
-        return new Response('Forbidden', { status: 403, headers: corsHeaders() });
-      }
+      const qsParams = new URLSearchParams(qs);
       try {
-        const krakenUrl = 'https://api.kraken.com' + path + (qs ? '?' + qs : '');
-        const r = await fetchWithTimeout(krakenUrl, 8000, { headers: { 'User-Agent': 'SwingAI/1.0' } });
-        const body = await r.text();
-        return new Response(body, { status: r.status, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+        if (path.startsWith('/1.0/public/candles/')) {
+          const symPart = path.slice('/1.0/public/candles/'.length);
+          const base = (symPart.split('/')[0] || 'BTC').toUpperCase();
+          const bybSym = base + 'USDT';
+          const ivMin = qsParams.get('interval') || '5';
+          const bybUrl = `${BYBIT_BASE}/v5/market/kline?category=spot&symbol=${bybSym}&interval=${ivMin}&limit=200`;
+          const r = await fetchWithTimeout(bybUrl, 8000, { headers: { 'User-Agent': 'SwingAI/1.0' } });
+          const d = await r.json();
+          const list = (d.result && d.result.list) || [];
+          const rows = list.slice().reverse().map(k => ({ start: +k[0], open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5] }));
+          return new Response(JSON.stringify({ data: rows }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+        }
+        if (path.startsWith('/1.0/public/tickers')) {
+          const symParam = qsParams.get('symbols') || 'BTC/USDC';
+          const base = (symParam.split('/')[0] || 'BTC').toUpperCase();
+          const bybSym = base + 'USDT';
+          const bybUrl = `${BYBIT_BASE}/v5/market/tickers?category=spot&symbol=${bybSym}`;
+          const r = await fetchWithTimeout(bybUrl, 8000, { headers: { 'User-Agent': 'SwingAI/1.0' } });
+          const d = await r.json();
+          const t = (d.result && d.result.list && d.result.list[0]) || null;
+          if (!t) return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+          const last = +t.lastPrice;
+          const chgPct = +(t.price24hPcnt || 0) * 100;
+          const priceChange24h = last - (last / (1 + chgPct / 100));
+          return new Response(JSON.stringify({ data: [{ symbol: symParam, bid: t.bid1Price, ask: t.ask1Price, mid: last, last_price: last, low_24h: t.lowPrice24h, high_24h: t.highPrice24h, price_change_24h: priceChange24h, volume_24h: t.volume24h }] }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+        }
+        if (path.startsWith('/2.0/public/order-book/')) {
+          const symPart = path.slice('/2.0/public/order-book/'.length);
+          const base = (symPart.split('/')[0] || 'BTC').toUpperCase();
+          const bybSym = base + 'USDT';
+          const limit = qsParams.get('limit') || '20';
+          const bybUrl = `${BYBIT_BASE}/v5/market/orderbook?category=spot&symbol=${bybSym}&limit=${limit}`;
+          const r = await fetchWithTimeout(bybUrl, 8000, { headers: { 'User-Agent': 'SwingAI/1.0' } });
+          const d = await r.json();
+          const bk = d.result || {};
+          const bids = (bk.b || []).map(x => ({ price: x[0], quantity: x[1] }));
+          const asks = (bk.a || []).map(x => ({ price: x[0], quantity: x[1] }));
+          return new Response(JSON.stringify({ data: { bids, asks } }), { status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+        }
+        return new Response('Forbidden', { status: 403, headers: corsHeaders() });
       } catch(e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 502, headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
       }
@@ -325,8 +494,10 @@ async function runBotCycle(env) {
   const drawdown = state.peakBalance > 0 ? (state.peakBalance - currentBalance) / state.peakBalance : 0;
   const drawdownBlocked = (state.drawdownBlock || 0) > Date.now();
   if (drawdown > 0.15 && !drawdownBlocked) {
-    state.drawdownBlock = Date.now() + 24 * 3600000;
-    addLog(state, 'Circuit breaker: -15% drawdown — blokada BUY 24h', 'err');
+    // Day trading: 6h zamiast 24h (swing) - wciaz znaczaca pauza po powaznym
+    // drawdown, ale nie blokujaca praktycznie calego nastepnego dnia handlowego.
+    state.drawdownBlock = Date.now() + 6 * 3600000;
+    addLog(state, 'Circuit breaker: -15% drawdown — blokada BUY 6h', 'err');
   }
 
   // Załaduj modele AI
@@ -456,6 +627,107 @@ function calcVWAP(highs, lows, closes, volumes) {
   return vol > 0 ? tpVol / vol : closes.at(-1);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// SMART MONEY CONCEPTS (SMC) — day trading
+// Mechaniczna, kodowalna interpretacja koncepcji SMC. To NIE jest gwarancja
+// takiej skutecznosci jak u doswiadczonego tradera SMC - to precyzyjne,
+// powtarzalne reguly inspirowane tymi koncepcjami, nie ich pelne odwzorowanie
+// (prawdziwa analiza SMC czesto zaklada uznaniowa interpretacje kontekstu).
+// ─────────────────────────────────────────────────────────────────────
+
+// Order Block: ostatnia swieca przeciwna do kierunku przed silnym ruchem
+// impulsywnym. Bullish OB = ostatnia swieca spadkowa przed mocnym ruchem w
+// gore; dziala jako strefa popytu (wsparcia) przy powrocie ceny.
+function detectOrderBlocks(o, h, l, c, atrVal) {
+  const blocks = [];
+  const n = c.length;
+  for (let i = 2; i < n - 1; i++) {
+    const bodyImpulse = Math.abs(c[i+1] - o[i+1]);
+    const isImpulseUp   = c[i+1] > o[i+1] && bodyImpulse > atrVal * 1.5;
+    const isImpulseDown = c[i+1] < o[i+1] && bodyImpulse > atrVal * 1.5;
+    const isDownCandle  = c[i] < o[i];
+    const isUpCandle    = c[i] > o[i];
+    if (isImpulseUp && isDownCandle) {
+      blocks.push({ type:'bullish', top:h[i], bottom:l[i], idx:i });
+    }
+    if (isImpulseDown && isUpCandle) {
+      blocks.push({ type:'bearish', top:h[i], bottom:l[i], idx:i });
+    }
+  }
+  return blocks.slice(-6); // ostatnie 6 - najbardziej aktualne strefy
+}
+
+// Fair Value Gap (imbalance): luka miedzy swieca 1 a swieca 3 (pomijajac 2),
+// ktorej rynek "nie zdazyl wycenic" - obszar czesto ponownie odwiedzany.
+function detectFVG(h, l, c) {
+  const gaps = [];
+  const n = c.length;
+  for (let i = 2; i < n; i++) {
+    if (h[i-2] < l[i]) { // bullish FVG - luka w gore
+      gaps.push({ type:'bullish', top:l[i], bottom:h[i-2], idx:i });
+    }
+    if (l[i-2] > h[i]) { // bearish FVG - luka w dol
+      gaps.push({ type:'bearish', top:l[i-2], bottom:h[i], idx:i });
+    }
+  }
+  return gaps.slice(-6);
+}
+
+// Liquidity sweep (stop hunt): cena robi knot ponizej niedawnego dolka
+// (zbiera zlecenia stop-loss/liquidity), po czym szybko wraca powyzej -
+// klasyczny bycz sygnal odwrocenia SMC. Analogicznie dla gornego knota.
+function detectLiquiditySweep(h, l, c, lookback=20) {
+  const n = c.length;
+  if (n < lookback + 3) return null;
+  const recentLow  = Math.min(...l.slice(-lookback-3, -3));
+  const recentHigh = Math.max(...h.slice(-lookback-3, -3));
+  const lastLow    = l[n-1], lastHigh = h[n-1], lastClose = c[n-1];
+  if (lastLow < recentLow && lastClose > recentLow) {
+    return { type:'bullish', sweptLevel: recentLow };
+  }
+  if (lastHigh > recentHigh && lastClose < recentHigh) {
+    return { type:'bearish', sweptLevel: recentHigh };
+  }
+  return null;
+}
+
+// Break of Structure (BOS, kontynuacja trendu) / Change of Character (CHoCH,
+// mozliwe odwrocenie) - na podstawie ostatnich pivotow swing high/low.
+function detectStructure(h, l, c, lookback=30) {
+  const n = c.length;
+  if (n < lookback) return { trend:'range', event:null };
+  const highs=[], lows=[];
+  for (let i = n-lookback+2; i < n-2; i++) {
+    if (h[i]>h[i-1]&&h[i]>h[i-2]&&h[i]>h[i+1]&&h[i]>h[i+2]) highs.push({v:h[i], idx:i});
+    if (l[i]<l[i-1]&&l[i]<l[i-2]&&l[i]<l[i+1]&&l[i]<l[i+2]) lows.push({v:l[i], idx:i});
+  }
+  if (highs.length<2 || lows.length<2) return { trend:'range', event:null };
+  const lastHigh = highs.at(-1), prevHigh = highs.at(-2);
+  const lastLow  = lows.at(-1),  prevLow  = lows.at(-2);
+  const higherHighs = lastHigh.v > prevHigh.v;
+  const higherLows  = lastLow.v  > prevLow.v;
+  const trend = higherHighs && higherLows ? 'up' : (!higherHighs && !higherLows ? 'down' : 'range');
+  const price = c[n-1];
+  let event = null;
+  if (trend==='up'   && price > lastHigh.v) event = 'BOS_up';
+  if (trend==='down' && price < lastLow.v)  event = 'BOS_down';
+  if (trend==='up'   && price < lastLow.v)  event = 'CHoCH_down';
+  if (trend==='down' && price > lastHigh.v) event = 'CHoCH_up';
+  return { trend, event };
+}
+
+// Premium/Discount: pozycja ceny w niedawnym zakresie wahan (50% = punkt
+// rownowagi). Ponizej 50% = strefa "discount" (atrakcyjna dla longow),
+// powyzej = "premium" (atrakcyjna dla shortow/realizacji zyskow).
+function premiumDiscountZone(h, l, c, lookback=30) {
+  const n = c.length;
+  const hh = Math.max(...h.slice(-lookback));
+  const ll = Math.min(...l.slice(-lookback));
+  if (hh===ll) return { zone:'equilibrium', pct:0.5 };
+  const pct = (c[n-1]-ll)/(hh-ll);
+  return { zone: pct<0.5?'discount':'premium', pct, rangeHigh:hh, rangeLow:ll };
+}
+
 function calcSRLevels(highs, lows, price) {
   const n = Math.min(50, highs.length);
   const start = highs.length - n;
@@ -498,13 +770,17 @@ function calcStats(trades) {
 }
 
 async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adaptiveMinScore) {
-  // Gate.io: interwały D, 4H, 1H
-  const kd      = await getKlines(sym, 'D',   200);
-  await sleep(200);
-  const k4h     = await getKlines(sym, '240', 100);
-  await sleep(200);
-  const k1h     = await getKlines(sym, '60',  50);
-  await sleep(200);
+  // DAY TRADING: interwaly intraday zamiast swingowych D/4H/1H.
+  // kd -> 1H (struktura/bias, dawniej Daily), k4h -> 15min (trend, dawniej 4H),
+  // k1h -> 5min (precyzyjne wejscie, dawniej 1H). Zmienne nazwy zostaly bez zmian
+  // celowo - caly scoring nizej (RSI/MACD/BB na kazdym TF) dziala identycznie,
+  // tylko dostaje dane z krotszych, wlasciwych dla intraday okien czasowych.
+  const kd      = await getKlines(sym, '60',  200);
+  await sleep(400);
+  const k4h     = await getKlines(sym, '15',  100);
+  await sleep(400);
+  const k1h     = await getKlines(sym, '5',   50);
+  await sleep(400);
   const obiData = await getOrderbook(sym);
 
   // Gate.io format: [timestamp_ms, open, high, low, close, volume] po mapowaniu w getKlines
@@ -519,7 +795,7 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
   const d = pk(kd), h4 = pk(k4h), h1 = pk(k1h);
   const price = d.c.at(-1);
 
-  // Wskaźniki Daily
+  // Wskaźniki 1H
   const rsiD   = rsi(d.c, 14);
   const macdD  = macdFull(d.c);
   const bbD    = bband(d.c, 20);
@@ -573,8 +849,8 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
   else if (rsi4h <= 50) { score += 5; }
   else if (rsi4h >= 70) { score -= 10; why.push('RSI-4H wykupiony'); }
 
-  if      (macdD.hist > 0 && macdD.line < 0) { score += 20; why.push('MACD cross up Daily'); }
-  else if (macdD.hist > 0)                    { score += 12; why.push('MACD hist+ Daily'); }
+  if      (macdD.hist > 0 && macdD.line < 0) { score += 20; why.push('MACD cross up 1H'); }
+  else if (macdD.hist > 0)                    { score += 12; why.push('MACD hist+ 1H'); }
   else if (macdD.hist > -atrD * 0.005)        { score += 4; }
   else                                         { score -= 5; }
 
@@ -592,6 +868,35 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
   else if (mom5 < -5 && mom10 < -10) { score += 5; why.push('Oversold momentum'); }
   else if (mom5 > 8)                  { score -= 5; why.push('Zbyt szybki wzrost'); }
 
+  // ── SMART MONEY CONCEPTS ──────────────────────────────────────────
+  // Struktura rynku liczona na 1H (d, wyzszy TF = bias/kontekst), order blocks/
+  // FVG/liquidity sweep na 5min (h1, najnizszy TF = precyzja wejscia). To zgodne
+  // z typowym podejsciem SMC: wyzszy TF daje kierunek, nizszy TF daje moment wejscia.
+  const structure   = detectStructure(d.h, d.l, d.c);
+  const orderBlocks = detectOrderBlocks(h1.o, h1.h, h1.l, h1.c, atr(h1.h, h1.l, h1.c, 14));
+  const fvgs        = detectFVG(h1.h, h1.l, h1.c);
+  const liqSweep    = detectLiquiditySweep(h1.h, h1.l, h1.c);
+  const premDisc     = premiumDiscountZone(d.h, d.l, d.c);
+
+  if (structure.event === 'BOS_up')        { score += 15; why.push('SMC: Break of Structure (bull)'); }
+  else if (structure.event === 'CHoCH_up') { score += 12; why.push('SMC: Change of Character (bull odwrocenie)'); }
+  else if (structure.event === 'BOS_down') { score -= 15; why.push('SMC: Break of Structure (bear)'); }
+  else if (structure.event === 'CHoCH_down'){ score -= 10; why.push('SMC: Change of Character (bear odwrocenie)'); }
+
+  if (liqSweep && liqSweep.type === 'bullish') { score += 14; why.push('SMC: Liquidity sweep (stop hunt) + odbicie'); }
+  if (liqSweep && liqSweep.type === 'bearish') { score -= 10; why.push('SMC: Liquidity sweep gorny'); }
+
+  const nearBullOB = orderBlocks.filter(b=>b.type==='bullish').some(b => price >= b.bottom*0.998 && price <= b.top*1.01);
+  const nearBearOB = orderBlocks.filter(b=>b.type==='bearish').some(b => price >= b.bottom*0.99 && price <= b.top*1.002);
+  if (nearBullOB) { score += 10; why.push('SMC: Cena przy bull Order Block'); }
+  if (nearBearOB) { score -= 8;  why.push('SMC: Cena przy bear Order Block'); }
+
+  const nearBullFVG = fvgs.filter(g=>g.type==='bullish').some(g => price >= g.bottom && price <= g.top);
+  if (nearBullFVG) { score += 6; why.push('SMC: Cena wypelnia bull FVG'); }
+
+  if (premDisc.zone === 'discount') { score += 6; why.push('SMC: Strefa discount (' + (premDisc.pct*100).toFixed(0) + '%)'); }
+  else                                { score -= 4; why.push('SMC: Strefa premium (' + (premDisc.pct*100).toFixed(0) + '%) - mniej atrakcyjne dla longa'); }
+
   if (volR > 1.8 || vol4R > 2.0) { score += 5; why.push('Vol spike x' + Math.max(volR,vol4R).toFixed(1)); }
   else if (volR < 0.4)            { score -= 8; why.push('Niski wolumen'); }
 
@@ -600,12 +905,16 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
   else            { score -= 3; }
 
   if      (divD.bull && div4h.bull) { score += 20; why.push('RSI dywergencja bycza D+4H'); }
-  else if (divD.bull)               { score += 14; why.push('RSI dywergencja bycza Daily'); }
+  else if (divD.bull)               { score += 14; why.push('RSI dywergencja bycza 1H'); }
   else if (div4h.bull)              { score += 8;  why.push('RSI dywergencja bycza 4H'); }
-  if (divD.bear)  { score -= 12; why.push('RSI dywergen. niedzwiedzia Daily'); }
+  if (divD.bear)  { score -= 12; why.push('RSI dywergen. niedzwiedzia 1H'); }
   if (div4h.bear) { score -= 7;  why.push('RSI dywergen. niedzwiedzia 4H'); }
 
-  if (trendD === -1 && rsiD > 50) { score = Math.min(score, 15); why.push('BESSA: brak long'); }
+  // bearBias byl wczesniej tylko odpisem punktowym (-30) - latwym do przebicia
+  // innymi bonusami (SMC/dywergencje), co puszczalo longi w wyraznej bessie.
+  // Teraz to twarda blokada wejscia (buy = false nizej), nie tylko punkty.
+  const bearBias = trendD === -1 && rsiD > 50;
+  if (bearBias) { score -= 30; why.push('BESSA: long zablokowany (twardy filtr)'); }
   score = Math.max(0, Math.min(100, Math.round(score)));
 
   if (price > vwap4h) { score += 8;  why.push('Ponad VWAP'); }
@@ -619,7 +928,11 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
   score = Math.max(0, Math.min(100, score));
 
   let regimeMinScoreAdj = 0;
-  if (regime === 'sideways')   { regimeMinScoreAdj = 8; }
+  // Sideways: +8 bylo za slabym filtrem wobec sumy mozliwych bonusow (np.
+  // +20 dywergencja + +15 BOS + +12 trend latwo przebijaly prog nawet w chopie).
+  // +18 realnie odcina wiekszosc sygnalow w bocznym rynku, gdzie SMC/dywergencje
+  // najczesciej daja falszywe sygnaly.
+  if (regime === 'sideways')   { regimeMinScoreAdj = 18; }
   if (regime === 'bull_trend') { score += 5; why.push('Rezim: bull trend'); }
   if (regime === 'bear_trend') { score -= 15; why.push('Rezim: bear trend'); }
   if (regime === 'volatile')   { score -= 8;  why.push('Rezim: volatile'); }
@@ -658,7 +971,8 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
   const qlSugg  = ql.suggests(qlSig);
   let qlBonus = 0;
   if (qlSugg) {
-    if (qlSugg.action === 'BUY' && qlSugg.confidence > 0.05) { qlBonus = 8; why.push('QL: BUY'); }
+    if (qlSugg.action === 'BUY'  && qlSugg.confidence > 0.05) { qlBonus =  8; why.push('QL: BUY'); }
+    if (qlSugg.action === 'HOLD' && qlSugg.confidence > 0.05) { qlBonus = -10; why.push('QL: czekac'); }
     score = Math.max(0, Math.min(100, score + qlBonus));
   }
 
@@ -683,21 +997,64 @@ async function analyzeSwing(sym, cfg, state, nb, gbm, ql, ew, pairParams, adapti
 
   const pp       = pairParams[sym] || PAIR_PARAMS_DEFAULT[sym] || null;
   const minScore = (pp ? pp.minScore : adaptiveMinScore) + regimeMinScoreAdj;
-  const buy      = finalProb >= minScore / 100;
+
+  // Confluence gate: czysta suma punktowa (score) potrafi przekroczyc prog na
+  // szumie kilku niezaleznych bonusow. Wymagamy zgodnosci min. 2 z 4 niezaleznych
+  // rodzin sygnalow (trend, momentum/RSI, struktura SMC, wolumen) - odcina to
+  // wejscia, gdzie sam wysoki score nie jest potwierdzony realna struktura rynku.
+  const confluence = [
+    trendD >= 1,
+    (rsiD <= 40 || bbD.pos < 0.20 || divD.bull || div4h.bull),
+    (structure.event === 'BOS_up' || structure.event === 'CHoCH_up' || nearBullOB || (liqSweep && liqSweep.type === 'bullish')),
+    (volR > 1.3 || vol4R > 1.3)
+  ].filter(Boolean).length;
+  if (finalProb >= minScore / 100 && confluence < 2) {
+    why.push('Score OK, ale brak confluence (' + confluence + '/4 rodzin sygnalow) — wejscie odrzucone');
+  }
+
+  const buy = finalProb >= minScore / 100 && confluence >= 2 && !bearBias;
+  // Sygnal SHORT - wylacznie informacyjny (Revolut X nie obsluguje marginu/shortow,
+  // wiec bot NIGDY nie wykonuje realnej krotkiej sprzedazy). Wymaga symetrycznie
+  // niskiego finalProb ORAZ potwierdzenia niedzwiedziej struktury SMC - samo niskie
+  // prawdopodobienstwo bez potwierdzenia struktury to za slaby sygnal do pokazania.
+  //
+  // Lustrzany confluence gate (ten sam prog co dla longa, NIE ostrzejszy - shorty
+  // sa tylko informacyjne, wiec nie ma powodu zawyzac bariery ponad to co juz
+  // dziala dla longow; wyzszy prog tylko zdusilby liczbe okazji pokazywanych w
+  // ciagu dnia bez realnej korzysci, skoro i tak nic sie nie wykonuje).
+  const bearConfluence = [
+    trendD <= -1,
+    (rsiD >= 60 || bbD.pos > 0.80 || divD.bear || div4h.bear),
+    (structure.event === 'BOS_down' || structure.event === 'CHoCH_down' || nearBearOB || (liqSweep && liqSweep.type === 'bearish')),
+    (volR > 1.3 || vol4R > 1.3)
+  ].filter(Boolean).length;
+  const shortSignal = finalProb <= (1 - minScore/100) && bearConfluence >= 2;
+  const shortLevels = shortSignal ? {
+    tp: price * (1 - Math.max(cfg.tp, atrD/price*2.5)),
+    sl: price * (1 + Math.max(cfg.sl, atrD/price*1.5)),
+    rr: (Math.max(cfg.tp, atrD/price*2.5) / Math.max(cfg.sl, atrD/price*1.5)).toFixed(1)
+  } : null;
 
   return {
     sym, price,
     rsiD: +rsiD.toFixed(1), rsi4h: +rsi4h.toFixed(1), rsi1h: +rsi1h.toFixed(1), confirm1h,
     macdHist: macdD.hist, macdLine: macdD.line,
     bbPos: bbD.pos, trendD, ema50, ema200, atrD,
-    score, finalProb: +finalProb.toFixed(3), buy,
+    score, finalProb: +finalProb.toFixed(3), buy, shortSignal, shortLevels,
     nbPred, gbmProb: +gbmProb.toFixed(3), qlSugg, aiMethod,
-    obiRatio: obiData.ratio || 0.5, obiScore,
+    obiRatio: obiData.ratio || 0.5, obiScore, spreadPct: obiData.spreadPct,
     patterns: patResult.patterns,
     srLevels, vwap4h, regime,
     why, nbFeatures, gbmFeatures, qlSig,
     volR: +volR.toFixed(2), vol4R: +vol4R.toFixed(2),
-    mom5: +mom5.toFixed(2), mom10: +mom10.toFixed(2)
+    mom5: +mom5.toFixed(2), mom10: +mom10.toFixed(2),
+    // Dane SMC + strefy TP/SL do wizualizacji na wykresie (dashboard)
+    smc: {
+      structure: structure.trend, event: structure.event,
+      orderBlocks: orderBlocks.slice(-3), fvgs: fvgs.slice(-3),
+      liqSweep, premiumDiscount: premDisc.zone, pdPct: +premDisc.pct.toFixed(3)
+    },
+    levels: calcDynamicLevels(price, atrD, cfg, pp, obiData.spreadPct)
   };
 }
 
@@ -715,10 +1072,18 @@ async function checkPositions(cfg, state, env, ql) {
       if (price > pos.highP) pos.highP = price;
 
       const pnlPct = (price - pos.entry) / pos.entry * 100;
-      const trail  = pos.highP * (1 - pos.trailDist);
+      const ageMs  = Date.now() - pos.entryTs;
+      // FIX: w ostatnim kwartale okna 8h pozycja i tak zostanie zamknieta
+      // TIMEOUT-em - zamiast czekac na to bez zabezpieczenia, zaciskamy trailing
+      // o polowe (jesli pozycja jest na plusie), zeby wczesniej zablokowac czesc
+      // zysku, ktory wczesniej regularnie bywal oddawany w ostatniej godzinie
+      // przed wymuszonym zamknieciem.
+      const nearTimeout   = ageMs > TIMEOUT_MS * 0.75;
+      const effTrailDist  = (nearTimeout && pnlPct > 0) ? pos.trailDist * 0.5 : pos.trailDist;
+      const trail  = pos.highP * (1 - effTrailDist);
       let reason = null;
 
-      if (Date.now() - pos.entryTs > TIMEOUT_MS)             reason = 'TIMEOUT 7d';
+      if (ageMs > TIMEOUT_MS)                                reason = 'TIMEOUT 8h';
       else if (price >= (pos.tp > 0 ? pos.tp : pos.entry * (1 + cfg.tp))) reason = 'TAKE PROFIT';
       else if (price <= (pos.partialClosed ? pos.sl : (pos.sl > 0 ? pos.sl : pos.entry * (1 - cfg.sl)))) reason = 'STOP LOSS';
       else if (price <= trail && pnlPct > 1.5)               reason = 'TRAILING STOP';
@@ -779,8 +1144,11 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
   if ((state.globalBlockUntil||0) > Date.now()) {
     addLog(state, 'Globalna blokada aktywna', 'warn'); return;
   }
-  if (isPumpDump(sig)) return;
-  if (isVolumeAnomaly(sig)) { addLog(state, 'Vol anomaly: ' + sig.sym + ' vol=' + sig.volR.toFixed(2) + 'x — pomijam', 'warn'); return; }
+  const pp0 = (state.pairParams||{})[sig.sym] || PAIR_PARAMS_DEFAULT[sig.sym];
+  const effMinScore = pp0 ? pp0.minScore : (state.adaptiveMinScore || cfg.minScore);
+  const pumpReason = isPumpDump(sig);
+  if (pumpReason) { addLog(state, 'Pump/dump guard (' + pumpReason + '): ' + sig.sym + ' — pomijam', 'warn'); return; }
+  if (isVolumeAnomaly(sig, effMinScore)) { addLog(state, 'Vol anomaly: ' + sig.sym + ' vol=' + sig.volR.toFixed(2) + 'x — pomijam', 'warn'); return; }
   if (isDeadHour()) { addLog(state, 'Dead hour (01-05 UTC): ' + sig.sym + ' — pomijam', 'warn'); return; }
 
   if (btcDrop && sig.sym !== 'XBTUSDT') {
@@ -794,9 +1162,7 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
   if (fg.val < cfg.fgMin) {
     const newProb = Math.max(0, sig.finalProb - 0.10);
     adjSig = Object.assign({}, sig, { finalProb: newProb, score: Math.max(0, sig.score - 10) });
-    const pp = (state.pairParams||{})[sig.sym] || PAIR_PARAMS_DEFAULT[sig.sym];
-    const minSc = pp ? pp.minScore : (state.adaptiveMinScore || cfg.minScore);
-    if (adjSig.finalProb < minSc / 100) {
+    if (adjSig.finalProb < effMinScore / 100) {
       addLog(state, 'F&G=' + fg.val + ' — po karze za slaby score pomijam ' + sig.sym, 'warn'); return;
     }
   }
@@ -828,13 +1194,14 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
   if (posSize < minSize) {
     addLog(state, 'Za mala pozycja (' + posSize.toFixed(2) + '$) — pomijam ' + sig.sym, 'warn'); return;
   }
-  const levels = calcDynamicLevels(adjSig.price, adjSig.atrD, cfg);
+  const pp     = pp0;
+  const levels = calcDynamicLevels(adjSig.price, adjSig.atrD, cfg, pp, adjSig.spreadPct);
 
   addLog(state,
-    'BUY ' + adjSig.sym + ' @ ' + adjSig.price.toFixed(4) +
+    'BUY ' + adjSig.sym + ' @ ' + fmtPrice(adjSig.price) +
     ' | score=' + adjSig.score + ' finalProb=' + (adjSig.finalProb*100).toFixed(1) + '%' +
-    ' | $' + posSize.toFixed(2) + ' TP=' + levels.tp.toFixed(4) +
-    ' SL=' + levels.sl.toFixed(4) + ' R:R=' + levels.rr +
+    ' | $' + posSize.toFixed(2) + ' TP=' + fmtPrice(levels.tp) +
+    ' SL=' + fmtPrice(levels.sl) + ' R:R=' + levels.rr +
     ' | ' + adjSig.aiMethod + ' | ' + cfg.mode.toUpperCase(), 'ok');
 
   if (!Array.isArray(state.positions)) state.positions = [];
@@ -843,7 +1210,7 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
     try {
       const res = await revxMarketBuy(adjSig.sym, posSize, cfg);
       const execP = res.price || adjSig.price;
-      const el    = calcDynamicLevels(execP, adjSig.atrD, cfg);
+      const el    = calcDynamicLevels(execP, adjSig.atrD, cfg, pp, adjSig.spreadPct);
       state.positions.push(buildPosition(adjSig, execP, res.qty, el, posSize, ql));
       if (!state.dailyStartBalance || state.dailyStartBalance <= 0) {
         try {
@@ -872,10 +1239,10 @@ async function openTrade(sig, fg, btcDrop, cfg, state, env, nb, gbm, ql, ew) {
   const _modeLabel = cfg.mode === 'live' ? 'LIVE (Revolut X)' : 'PAPER (symulacja)';
   await tgSend(cfg,
     'SYGNAL KUPNA — ' + _pairName + '\n\n' +
-    'Cena wejscia: $' + adjSig.price.toFixed(4) + '\n' +
+    'Cena wejscia: $' + fmtPrice(adjSig.price) + '\n' +
     'Rozmiar pozycji: $' + posSize.toFixed(2) + ' (Kelly)\n' +
-    'Take Profit: $' + levels.tp.toFixed(4) + '\n' +
-    'Stop Loss: $' + levels.sl.toFixed(4) + '\n' +
+    'Take Profit: $' + fmtPrice(levels.tp) + '\n' +
+    'Stop Loss: $' + fmtPrice(levels.sl) + '\n' +
     'Zysk/Ryzyko: ' + levels.rr + '\n\n' +
     'Wynik AI: ' + adjSig.score + '/100 | Pewnosc: ' + (adjSig.finalProb*100).toFixed(1) + '%\n' +
     'Metoda: ' + adjSig.aiMethod + '\n' +
@@ -916,10 +1283,13 @@ async function closePosition(pos, price, reason, cfg, state, ql) {
   if (pnl < 0) {
     state.consLoss = (state.consLoss || 0) + 1;
     if (!state.cooldown || typeof state.cooldown !== 'object') state.cooldown = {};
-    state.cooldown[pos.sym] = Date.now() + 12 * 3600000;
-    if (state.consLoss >= 4) {
-      state.globalBlockUntil = Date.now() + 3 * 3600000;
-      addLog(state, '4 straty z rzedu — blokada 3h', 'err');
+    // Day trading: 60 min (bylo 45) - wciaz w ramach jednej sesji, ale dluzej
+    // niz jeden cykl "zle wejscie -> szybki re-entry w te same warunki" (skan
+    // co 3 min), co ograniczalo overtrading po stracie na tej samej parze.
+    state.cooldown[pos.sym] = Date.now() + 60 * 60000;
+    if (state.consLoss >= 3) {
+      state.globalBlockUntil = Date.now() + 90 * 60000; // bylo: 4 straty -> 1h
+      addLog(state, '3 straty z rzedu — blokada 90 min', 'err');
     }
   } else {
     state.consLoss = 0;
@@ -935,7 +1305,7 @@ async function closePosition(pos, price, reason, cfg, state, ql) {
     pnl: +pnl.toFixed(4), pnlPct: +pnlPct.toFixed(2),
     durH, reason, score: pos.score, finalProb: pos.finalProb,
     aiMethod: pos.aiMethod, nbFeatures: pos.nbFeatures, gbmFeatures: pos.gbmFeatures,
-    nbLabel: pos.nbLabel || 'NEUTRAL', ts: Date.now()
+    nbLabel: pos.nbLabel || 'NEUTRAL', gbmProb: pos.gbmProb, ts: Date.now()
   };
   state.trades = [trade, ...(state.trades || [])].slice(0, 300);
   state.stats = calcStats(state.trades);
@@ -951,7 +1321,7 @@ async function closePosition(pos, price, reason, cfg, state, ql) {
   const _reasonPL = reason === 'TAKE PROFIT' ? 'REALIZACJA ZYSKU' :
     reason === 'STOP LOSS' ? 'STOP LOSS AKTYWOWANY' :
     reason === 'TRAILING STOP' ? 'STOP KROCZACY' :
-    reason === 'TIMEOUT 7d' ? 'KONIEC CZASU (7 dni)' : reason;
+    reason === 'TIMEOUT 8h' ? 'KONIEC CZASU (8h)' : reason;
   await tgSend(cfg,
     (pnl>=0?'[+]':'[-]') + ' ' + _reasonPL + ' — ' + _closeSym + '\n\n' +
     'Wynik: ' + (pnl>=0?'+':'') + '$' + pnl.toFixed(2) + ' (' + pnlPct.toFixed(2) + '%)\n' +
@@ -963,15 +1333,35 @@ async function closePosition(pos, price, reason, cfg, state, ql) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // GUARDS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FIX: poprzednie stale progi (vol4R>4.0x, mom5>8%/5h, mom10>12%/10h) byly
+// kalibrowane "na czuja" pod BTC/ETH/SOL/XRP. Dla spokojnej pary (np. BTC w
+// nudnym okresie) byly za luzne - realnie ekstremalny ruch 6-7%/5h przechodzil
+// bez ostrzezenia. Dla kazdej pary o wyzszej naturalnej zmiennosci (np. przyszly
+// memecoin typu PEPE) bylyby odwrotnie - albo martwym filtrem blokujacym co
+// drugi sygnal, albo wciaz przepuszczaly ruchy ekstremalne jak na TEN konkretny
+// instrument. Rozwiazanie: prog wzgledny do ATR danej pary w danym momencie
+// (pierwiastek czasu jako przyblizenie skalowania zmiennosci w czasie) - ten sam
+// mechanizm dziala automatycznie dla kazdego instrumentu/rezimu zmiennosci bez
+// recznego przeliczania progow per-symbol. Mnozniki (3.5x) to punkt startowy do
+// kalibracji na realnych danych/backteście, nie ostateczna wartosc.
 function isPumpDump(sig) {
-  if (sig.vol4R > 4.0) return true;
-  if (sig.mom5  > 15)  return true;
-  return false;
+  const atrPct = (sig.atrD && sig.price) ? (sig.atrD / sig.price) * 100 : 0.5;
+  const vol4Thresh  = 4.0;
+  const mom5Thresh  = Math.max(4, atrPct * Math.sqrt(5)  * 3.5);
+  const mom10Thresh = Math.max(6, atrPct * Math.sqrt(10) * 3.5);
+  if (sig.vol4R > vol4Thresh)  return 'vol4R=' + sig.vol4R.toFixed(1) + 'x';
+  if (sig.mom5  > mom5Thresh)  return 'mom5=' + sig.mom5.toFixed(1) + '%/5h (prog ' + mom5Thresh.toFixed(1) + '%, ATR-relative)';
+  if (sig.mom10 > mom10Thresh) return 'mom10=' + sig.mom10.toFixed(1) + '%/10h (prog ' + mom10Thresh.toFixed(1) + '%, ATR-relative)';
+  return null;
 }
 
-function isVolumeAnomaly(sig) {
+// FIX: prog "62" byl na trwale wpisany na sztywno, mimo ze realny effMinScore per
+// para roznil sie od 62 do 66 (PAIR_PARAMS_DEFAULT) - filtr byl przez to nieco
+// niezgodny z faktycznym progiem wejscia danej pary. Przyjmuje teraz effMinScore
+// jako parametr (liczony raz w openTrade i przekazywany dalej).
+function isVolumeAnomaly(sig, effMinScore) {
   if (sig.volR < 0.35) return true;
-  if (sig.score >= 62 && sig.vol4R < 0.3) return true;
+  if (sig.score >= (effMinScore || 62) && sig.vol4R < 0.3) return true;
   return false;
 }
 
@@ -982,16 +1372,12 @@ function isDeadHour() {
 
 async function btcDropGuard() {
   try {
-    const r = await fetchWithTimeout('https://api.kraken.com/0/public/Ticker?pair=XBTUSDT');
+    const r = await fetchWithTimeout(`${BYBIT_BASE}/v5/market/tickers?category=spot&symbol=BTCUSDT`);
     const d = await r.json();
-    if (d.error && d.error.length > 0) return false;
-    const key = Object.keys(d.result || {})[0];
-    if (!key) return false;
-    const t = d.result[key];
-    const open24h = +t.o;
-    const last    = +t.c[0];
-    if (!open24h) return false;
-    return (last - open24h) / open24h * 100 < -5;
+    const t = (d.result && d.result.list && d.result.list[0]) || null;
+    if (!t) return false;
+    const pct = +(t.price24hPcnt || 0) * 100;
+    return pct < -5;
   } catch(e) { return false; }
 }
 
@@ -1040,11 +1426,31 @@ function kellySize(cfg, state, total) {
   return Math.min(fixedSize, sz, safeTotal * 0.20);
 }
 
-function calcDynamicLevels(price, atrD, cfg) {
-  const atrPct   = atrD / price;
-  const tpOffset = Math.max(cfg.tp,   atrPct * 2.5);
-  const slOffset = Math.max(cfg.sl,   atrPct * 1.5);
-  const trail    = Math.max(cfg.trail, atrPct * 1.2);
+// FIX: bufor na spread/poslizg market-orderow na Revolut X byl stala 0.15%
+// niezaleznie od pary i chwili - w spokojnych momentach dla BTC/ETH to zawyzalo
+// TP/SL bez potrzeby, a przy chwilowo niskiej plynnosci (np. XRP w slabych
+// godzinach) bywalo zbyt waskie wobec realnego spreadu, ktory "zjadal" TP
+// zanim market-order faktycznie sie zamknal. Liczymy teraz realny spread z
+// live orderbooka (ten sam odczyt co OBI, patrz getOrderbook) i uzywamy go
+// jako bufora, z podloga/sufitem jako zabezpieczeniem przed anomaliami danych
+// (np. chwilowa dziura w orderbooku dajaca absurdalny spread).
+const SPREAD_BUFFER_MIN     = 0.0008;
+const SPREAD_BUFFER_MAX     = 0.006;
+const SPREAD_BUFFER_DEFAULT = 0.0015; // uzywany gdy spreadPct niedostepny (fallback jak wczesniej)
+
+function effectiveSpreadBuffer(spreadPct) {
+  if (spreadPct == null || !isFinite(spreadPct) || spreadPct <= 0) return SPREAD_BUFFER_DEFAULT;
+  return Math.max(SPREAD_BUFFER_MIN, Math.min(SPREAD_BUFFER_MAX, spreadPct * 1.5));
+}
+
+function calcDynamicLevels(price, atrD, cfg, pp, spreadPct) {
+  const atrPct    = atrD / price;
+  const cfgTp     = (pp && pp.tp != null) ? pp.tp : cfg.tp;
+  const cfgSl     = (pp && pp.sl != null) ? pp.sl : cfg.sl;
+  const spreadBuf = effectiveSpreadBuffer(spreadPct);
+  const tpOffset  = Math.max(cfgTp,   atrPct * 2.5) + spreadBuf;
+  const slOffset  = Math.max(cfgSl,   atrPct * 1.5) + spreadBuf;
+  const trail     = Math.max(cfg.trail, atrPct * 1.2);
   const tp    = price * (1 + tpOffset);
   const sl    = price * (1 - slOffset);
   const rr    = ((tp - price) / (price - sl)).toFixed(1);
@@ -1125,9 +1531,22 @@ const PATTERNS = {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MODUŁY AI/ML
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FIX: rebalancing liczyl wagi WYLACZNIE z trafnosci (accuracy) - to ignoruje
+// asymetrie wygranych/strat. Komponent moze miec 55% trafnosci, ale przegrywac
+// wiecej na tych 45% blednych sygnalow niz zarabia na 55% poprawnych (i vice
+// versa) - to dla realnego P&L jest tak samo wazne jak win-rate. Dodajemy
+// "expectancyFactor": przecietny wynik % transakcji, w ktorych dany komponent
+// mowil BUY, jako mnoznik korygujacy wage wynikajaca z samej trafnosci.
 function rebalanceEnsemble(ew, nb, gbm, recentTrades) {
   if (!recentTrades || recentTrades.length < 10) return null;
   const newEw = { score: ew.score, nb: ew.nb, gbm: ew.gbm, obi: ew.obi, ql: ew.ql };
+
+  function expectancyFactor(matchFn) {
+    const matched = recentTrades.filter(matchFn);
+    if (matched.length < 3) return 1;
+    const avgPnlPct = matched.reduce((s,t) => s + (t.pnlPct||0), 0) / matched.length;
+    return Math.max(0.6, Math.min(1.4, 1 + avgPnlPct / 15));
+  }
 
   let nbCorrect = 0, nbTotal = 0;
   recentTrades.forEach(t => {
@@ -1137,12 +1556,33 @@ function rebalanceEnsemble(ew, nb, gbm, recentTrades) {
   });
   if (nbTotal >= 5) {
     const nbAcc = nbCorrect / nbTotal;
-    newEw.nb = +Math.max(0.3, Math.min(1.5, nbAcc * 2)).toFixed(2);
+    const nbExp = expectancyFactor(t => t.nbLabel === 'BUY');
+    newEw.nb = +Math.max(0.3, Math.min(1.5, nbAcc * 2 * nbExp)).toFixed(2);
   }
 
   const gbmAcc = gbm.accuracyOOS > 0 ? gbm.accuracyOOS / 100 : 0.5;
-  newEw.gbm = +Math.max(0.3, Math.min(1.5, gbmAcc * 2)).toFixed(2);
-  newEw.score = 1.0;
+  const gbmExp = expectancyFactor(t => typeof t.gbmProb === 'number' && t.gbmProb >= 0.5);
+  newEw.gbm = +Math.max(0.3, Math.min(1.5, gbmAcc * 2 * gbmExp)).toFixed(2);
+
+  // Komponent "score" byl wczesniej na trwale zablokowany na wadze 1.0, mimo
+  // ze to suma ~15 recznie dobranych punktow bez zadnej walidacji skutecznosci
+  // (w przeciwienstwie do NB/GBM, ktore mialy tracked accuracy). Teraz liczymy
+  // jego wlasna trafnosc: score >= 60 traktujemy jako "component-BUY" i
+  // sprawdzamy zgodnosc z wynikiem transakcji, analogicznie do NB powyzej,
+  // razem z tym samym expectancyFactor.
+  const SCORE_BUY_THRESHOLD = 60;
+  let scoreCorrect = 0, scoreTotal = 0;
+  recentTrades.forEach(t => {
+    if (typeof t.score !== 'number') return;
+    scoreTotal++;
+    if ((t.score >= SCORE_BUY_THRESHOLD && t.pnl > 0) || (t.score < SCORE_BUY_THRESHOLD && t.pnl <= 0)) scoreCorrect++;
+  });
+  if (scoreTotal >= 5) {
+    const scoreAcc = scoreCorrect / scoreTotal;
+    const scoreExp = expectancyFactor(t => typeof t.score === 'number' && t.score >= SCORE_BUY_THRESHOLD);
+    newEw.score = +Math.max(0.3, Math.min(1.5, scoreAcc * 2 * scoreExp)).toFixed(2);
+  }
+
   newEw.obi = 0.3;
   return newEw;
 }
@@ -1437,8 +1877,21 @@ function atr(h, l, c, p=14) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// MARKET DATA — GATE.IO (public, no auth)
+// MARKET DATA — BYBIT V5 (public, no auth) — https://api.bybit.com
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Revolut X /public/candles i /public/order-book okazaly sie mimo nazwy "public"
+// WYMAGAC autoryzacji (HTTP 401 "Unauthenticated access", zweryfikowane empirycznie
+// 2026-09-02) - dziala bez klucza jedynie /public/tickers. Zamiast blokowac cala
+// analize (RSI/MACD/ATR licza sie ze swiec) do czasu uzyskania klucza API Revolut X,
+// dane rynkowe ida z Bybit v5 (bez auth, sprawdzone ze dziala z Cloudflare Workers -
+// juz uzywane w tej rodzinie botow, patrz komentarze w swingai-bot/MEXC). Symbol
+// danych (Bybit BTCUSDT) != symbol egzekucji (Revolut X BTC/USDC) - to jest OK,
+// identyczny wzorzec co w bocie MEXC (dane Kraken XBTUSDT, egzekucja MEXC BTCUSDC):
+// USDT i USDC sa praktycznie 1:1, wiec ruch ceny (do czego slyzy analiza) jest
+// wiarygodny mimo innego zrodla niz miejsce faktycznego zlecenia.
+const BYBIT_BASE = 'https://api.bybit.com';
+function bybitSymbol(sym) { return sym.replace('XBT', 'BTC'); }
+
 function fetchWithTimeout(url, ms, opts) {
   ms = ms || 8000;
   const ctrl = new AbortController();
@@ -1447,47 +1900,65 @@ function fetchWithTimeout(url, ms, opts) {
   return fetch(url, options).finally(() => clearTimeout(tid));
 }
 
+// Bybit zwraca retCode!=0 (np. 10006/10018 = rate limit) w JSON z HTTP 200, nie
+// przez HTTP status - retry musi sprawdzac retCode, analogicznie do sprawdzania
+// d.error na Krakenie w bocie MEXC.
+async function fetchBybitWithRetry(url, tries) {
+  tries = tries || 3;
+  const delays = [500, 1500, 3000];
+  let lastErr;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      const r = await fetchWithTimeout(url, 8000);
+      const d = await r.json();
+      if (d.retCode === 10006 || d.retCode === 10018) { lastErr = new Error('Bybit: rate limit (' + d.retCode + ')'); }
+      else if (d.retCode !== 0) { lastErr = new Error('Bybit: ' + d.retMsg + ' (' + d.retCode + ')'); }
+      else { return d; }
+    } catch(e) { lastErr = e; }
+    if (attempt < tries - 1) await sleep(delays[attempt] || 3000);
+  }
+  throw lastErr || new Error('Bybit: nieznany blad');
+}
+
 async function getKlines(sym, interval, limit) {
-  // Kraken public API — nie blokuje CF Workers
-  const ivMap = { 'D':'1440', '240':'240', '60':'60', '30':'30', '15':'15' };
-  const iv = ivMap[interval] || '1440';
-  const r = await fetchWithTimeout(
-    `https://api.kraken.com/0/public/OHLC?pair=${sym}&interval=${iv}&count=${limit}`
+  const bsym = bybitSymbol(sym);
+  const d = await fetchBybitWithRetry(
+    `${BYBIT_BASE}/v5/market/kline?category=spot&symbol=${bsym}&interval=${interval}&limit=${limit}`
   );
-  if (!r.ok) throw new Error('getKlines HTTP ' + r.status + ' ' + sym);
-  const d = await r.json();
-  if (d.error && d.error.length > 0) throw new Error('getKlines Kraken: ' + d.error[0] + ' ' + sym);
-  const key = Object.keys(d.result || {}).find(k => k !== 'last');
-  if (!key) throw new Error('getKlines: brak danych ' + sym);
-  const list = d.result[key];
-  if (!Array.isArray(list) || list.length === 0) throw new Error('getKlines: pusta lista ' + sym);
-  // Kraken: [time, open, high, low, close, vwap, volume, count]
-  return list.map(k => [+k[0]*1000, +k[1], +k[2], +k[3], +k[4], +k[6]]);
+  const list = (d.result && d.result.list) || [];
+  if (!list.length) throw new Error('getKlines: pusta lista ' + sym);
+  // Bybit zwraca najnowsza swiece pierwsza - odwroc do konwencji najstarsza->najnowsza
+  return list.slice().reverse().map(k => [+k[0], +k[1], +k[2], +k[3], +k[4], +k[5]]);
 }
 
 async function getLastPrice(sym) {
-  const r = await fetchWithTimeout(`https://api.kraken.com/0/public/Ticker?pair=${sym}`);
-  if (!r.ok) throw new Error('getPrice HTTP ' + r.status);
-  const d = await r.json();
-  if (d.error && d.error.length > 0) throw new Error('getPrice Kraken: ' + d.error[0]);
-  const key = Object.keys(d.result || {})[0];
-  if (!key) throw new Error('getPrice: brak danych ' + sym);
-  return +d.result[key].c[0];
+  const bsym = bybitSymbol(sym);
+  const d = await fetchBybitWithRetry(`${BYBIT_BASE}/v5/market/tickers?category=spot&symbol=${bsym}`);
+  const t = (d.result && d.result.list && d.result.list[0]) || null;
+  if (!t) throw new Error('getPrice: brak danych ' + sym);
+  return +t.lastPrice;
 }
 
 async function getOrderbook(sym) {
   try {
-    const r = await fetchWithTimeout(`https://api.kraken.com/0/public/Depth?pair=${sym}&count=20`);
-    if (!r.ok) return { ratio: 0.5 };
-    const d = await r.json();
-    if (d.error && d.error.length > 0) return { ratio: 0.5 };
-    const key = Object.keys(d.result || {})[0];
-    if (!key) return { ratio: 0.5 };
-    const bids = d.result[key].bids.reduce((s, x) => s + +x[1], 0);
-    const asks = d.result[key].asks.reduce((s, x) => s + +x[1], 0);
+    const bsym = bybitSymbol(sym);
+    const d = await fetchBybitWithRetry(`${BYBIT_BASE}/v5/market/orderbook?category=spot&symbol=${bsym}&limit=20`, 2);
+    const book = d.result || {};
+    const bidsArr = book.b || [], asksArr = book.a || [];
+    const bids = bidsArr.reduce((s, x) => s + +x[1], 0);
+    const asks = asksArr.reduce((s, x) => s + +x[1], 0);
     const total = bids + asks;
-    return { ratio: total > 0 ? bids / total : 0.5, bids, asks };
-  } catch(e) { return { ratio: 0.5 }; }
+    // FIX: dodano spreadPct z top-of-book (Bybit v5: book.b[0]=najlepszy bid,
+    // book.a[0]=najlepszy ask) - uzywane teraz do dynamicznego bufora TP/SL
+    // (effectiveSpreadBuffer/calcDynamicLevels) zamiast stalej 0.15%.
+    let spreadPct = null;
+    if (bidsArr.length && asksArr.length) {
+      const bestBid = +bidsArr[0][0], bestAsk = +asksArr[0][0];
+      const mid = (bestBid + bestAsk) / 2;
+      if (mid > 0 && bestAsk >= bestBid) spreadPct = (bestAsk - bestBid) / mid;
+    }
+    return { ratio: total > 0 ? bids / total : 0.5, bids, asks, spreadPct };
+  } catch(e) { return { ratio: 0.5, spreadPct: null }; }
 }
 
 function calcOBI(obiData) {
@@ -1590,11 +2061,21 @@ async function revxRequest(method, path, body, cfg) {
 }
 
 // Pobierz saldo USDC z Revolut X
+// FIX: dodano retry (bylo: jedno zadanie, zero ponownych prob) - w przeciwienstwie
+// do wywolan Bybit, ktore od poczatku mialy fetchBybitWithRetry. Jednorazowy blad
+// sieci zostawial state.liveBalance nieaktualne na caly cykl (dailyStartBalance,
+// Kelly sizing, drawdown circuit breaker - wszystko liczone na starym saldzie).
 async function revxGetBalance(cfg) {
-  const accounts = await revxRequest('GET', '/accounts', null, cfg);
-  if (!Array.isArray(accounts)) throw new Error('Revolut X balance: nieprawidlowa odpowiedz');
-  const usdc = accounts.find(a => a.currency === 'USDC');
-  return usdc ? +usdc.balance : 0;
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const accounts = await revxRequest('GET', '/accounts', null, cfg);
+      if (!Array.isArray(accounts)) throw new Error('Revolut X balance: nieprawidlowa odpowiedz');
+      const usdc = accounts.find(a => a.currency === 'USDC');
+      return usdc ? +usdc.balance : 0;
+    } catch(e) { lastErr = e; if (attempt === 0) await sleep(800); }
+  }
+  throw lastErr;
 }
 
 // Market BUY — kupuje za quoteSize USDC
@@ -1609,18 +2090,29 @@ async function revxMarketBuy(sym, quoteSize, cfg) {
   const order = await revxRequest('POST', '/orders', body, cfg);
   if (!order.id) throw new Error('Revolut X buy: brak order.id — ' + JSON.stringify(order));
 
-  // Poczekaj chwilę, pobierz szczegóły zlecenia
-  await sleep(1500);
-  let details;
-  try {
-    details = await revxRequest('GET', '/orders/' + order.id, null, cfg);
-  } catch(e) {
-    // Jeśli pobranie szczegółów się nie powiodło — użyj danych z odpowiedzi create
-    details = order;
+  // FIX: probuj kilka razy pobrac potwierdzone szczegoly zlecenia (average_price +
+  // filled_base_size), zamiast po jednej nieudanej probie zgadywac filledQty jako
+  // quoteSize/1 - to bylo krytyczne: przy braku danych bot traktowal np. $15 jak
+  // 15 jednostek BTC (pozycja fikcyjnie kilkaset tysiecy razy za duza), co zatrulo
+  // by dailyPnl, portfolio heat, Kelly sizing i modele NB/GBM/QL uczone na tych
+  // tradach. Lepiej NIE zapisac pozycji i zglosic to glosno (Telegram + throw),
+  // niz zapisac ja z odgadnietymi, bezsensownymi danymi.
+  let details = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await sleep(1500);
+    try {
+      const d = await revxRequest('GET', '/orders/' + order.id, null, cfg);
+      details = d;
+      if (d && d.average_price && d.filled_base_size) break;
+    } catch(e) { /* sprobuj ponownie */ }
   }
 
-  const avgPrice = details.average_price ? +details.average_price : 0;
-  const filledQty = details.filled_base_size ? +details.filled_base_size : (quoteSize / (avgPrice || 1));
+  const avgPrice  = details && details.average_price ? +details.average_price : 0;
+  const filledQty = details && details.filled_base_size ? +details.filled_base_size : 0;
+  if (!avgPrice || !filledQty) {
+    await tgSend(cfg, '[KRYTYCZNE] Zlecenie BUY ' + order.id + ' (' + sym + ') zlozone na Revolut X, ale bot nie otrzymal average_price/filled_base_size po 3 probach — SPRAWDZ RECZNIE na Revolut X! Pozycja NIE jest sledzona przez bota.');
+    throw new Error('Revolut X buy: zlecenie ' + order.id + ' zlozone, ale brak average_price/filled_base_size po 3 probach — pozycja NIE zapisana (sprawdz recznie!)');
+  }
   return { price: avgPrice, qty: filledQty, orderId: order.id };
 }
 
@@ -1655,6 +2147,64 @@ async function tgSend(cfg, msg) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PIN GATE — HELPERY (sesje, hash, rate-limit, CORS z credentials)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+function randomToken(len) {
+  const bytes = new Uint8Array(len || 32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+function getCookie(request, name) {
+  const cookie = request.headers.get('Cookie') || '';
+  for (const part of cookie.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === name) return part.slice(idx + 1).trim();
+  }
+  return null;
+}
+async function isValidSession(env, request) {
+  const sid = getCookie(request, 'swingai_sess');
+  if (!sid) return false;
+  const v = await env.SWINGAI_REVOLUT_KV.get('sess_' + sid);
+  return !!v;
+}
+async function checkPinRateLimit(env, ip) {
+  const key = 'pinfail_' + ip;
+  const raw = await env.SWINGAI_REVOLUT_KV.get(key);
+  const count = raw ? (parseInt(raw, 10) || 0) : 0;
+  return { blocked: count >= 5, key };
+}
+async function recordPinFail(env, key) {
+  const raw = await env.SWINGAI_REVOLUT_KV.get(key);
+  const count = (raw ? (parseInt(raw, 10) || 0) : 0) + 1;
+  await env.SWINGAI_REVOLUT_KV.put(key, String(count), { expirationTtl: 900 });
+}
+async function clearPinFail(env, key) {
+  try { await env.SWINGAI_REVOLUT_KV.delete(key); } catch(e) {}
+}
+// Zezwalamy na credentialed cross-site fetch (cookie sesji) TYLKO z domen GitHub
+// Pages tego projektu - w przeciwienstwie do reszty API (corsHeaders(), '*', bez
+// credentials) ktore obsluguje dane publiczne bez sesji.
+function pinCorsHeaders(request) {
+  const origin = request.headers.get('Origin') || '';
+  const allowed = origin.endsWith('.github.io') || origin === 'https://tomekfalek-cyber.github.io';
+  return {
+    'Access-Control-Allow-Origin': allowed ? origin : 'https://tomekfalek-cyber.github.io',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Allow-Credentials': 'true'
+  };
+}
+function pinJsonResp(data, status, request) {
+  return new Response(JSON.stringify(data), { status: status || 200, headers: Object.assign({ 'Content-Type': 'application/json' }, pinCorsHeaders(request)) });
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // KV HELPERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function getConfig(env) {
@@ -1669,9 +2219,12 @@ async function getState(env) {
 function defaultConfig() {
   return {
     active: false, mode: 'paper',
-    tp: 0.12, sl: 0.05, trail: 0.06,
+    // Day trading: dużo ciaśniejsze poziomy niż w wersji swingowej (tam 12%/5%/6%) -
+    // pozycje trzymane w ciągu jednego dnia, nie tygodni, więc oczekiwany ruch ceny
+    // jest odpowiednio mniejszy. Wartości startowe, do kalibracji na realnych danych.
+    tp: 0.02, sl: 0.01, trail: 0.008,
     maxPos: 4, posSize: 15, riskPct: 2,
-    paperBalance: 1000, minScore: 58, fgMin: 20,
+    paperBalance: 1000, minScore: 62, fgMin: 20,
     revxApiKey: '', revxPrivKey: '',
     tgToken: '', tgChat: ''
   };
@@ -1686,7 +2239,7 @@ function defaultState() {
     lastCycle: null, lastFG: { val: 50, label: 'Neutral', ts: 0 },
     lastSigs: [],
     nb: null, gbm: null, ql: null, ensembleW: null,
-    pairParams: {}, adaptiveMinScore: 58,
+    pairParams: {}, adaptiveMinScore: 62,
     peakBalance: 0, peakBalanceMode: 'paper',
     drawdownBlock: 0, stats: null,
     lastGbmRefit: 0
@@ -1698,6 +2251,17 @@ function addLog(state, msg, type='info') {
 }
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// FIX: .toFixed(4) na cenie dawal "0.0000" dla PEPE (~$0.000005) w logach i
+// Telegramie - bezuzyteczne. Adaptacyjna precyzja wedlug rzedu wielkosci ceny
+// (ten sam pomysl co juz istniejaca fp() w dashboardzie index.html).
+function fmtPrice(p) {
+  if (!isFinite(p)) return String(p);
+  if (p >= 1000) return p.toFixed(1);
+  if (p >= 1)    return p.toFixed(4);
+  if (p >= 0.01) return p.toFixed(6);
+  return p.toFixed(8);
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // HELPERS
@@ -1723,5 +2287,7 @@ function redirectHTML(msg) {
 <style>body{background:#020810;color:#00e5a0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:1.4em;flex-direction:column;gap:12px;}</style>
 </head><body><div>${msg}</div><div style="color:#334d74;font-size:0.5em">Przekierowanie za 2 sekundy...</div></body></html>`;
 }
+
+
 
 
